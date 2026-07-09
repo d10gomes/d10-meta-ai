@@ -1,229 +1,198 @@
 """
-Budget Optimizer Agent — Especialista em otimização de orçamento Meta Ads.
-
-Redistribui automaticamente orçamentos com base em ROAS, CPA e CTR.
-Escala campanhas vencedoras, reduz em perdedoras, pausa queimadores.
-Roda a cada 6 horas.
+Budget Optimizer Agent — Papel: OTIMIZADOR DE ORÇAMENTO
+- Lê decisões do Decision Agent e análises do Analyst
+- Calcula redistribuição ótima de budget entre campanhas
+- Usa Claude para raciocinar sobre a melhor alocação
+- Mantém histórico de ajustes e seus impactos para aprender
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select, func
+from sqlalchemy import select, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.base import AgentBase
 from app.core.logging import logger
-from app.db.models import Campaign, AdSet, Ad, AdMetric, MetaAccount
-from app.infrastructure.meta_api.client import MetaAdsClient
+from app.db.models import Campaign, AdSet, Ad, AdMetric, MetaAccount, AgentAction
 
 
-# Regras de otimização
-SCALE_UP_ROAS = 3.0        # ROAS >= 3x → aumentar orçamento
-SCALE_DOWN_ROAS = 0.8      # ROAS <= 0.8x → reduzir orçamento
-PAUSE_ROAS = 0.3           # ROAS <= 0.3x E gasto > R$80 → pausar campanha
-PAUSE_NO_CONV_SPEND = 120  # Gasto > R$120 sem conversão → pausar
-SCALE_UP_PCT = 0.25        # +25% no orçamento
-SCALE_DOWN_PCT = 0.30      # -30% no orçamento
-MIN_SPEND_TO_ACT = 20      # Mínimo de gasto (R$) para tomar decisão
-MIN_DAILY_BUDGET = 500     # Mínimo de orçamento diário (centavos) = R$5
-MAX_DAILY_BUDGET = 500000  # Máximo de orçamento diário (centavos) = R$5000
+class BudgetOptimizerService(AgentBase):
+    name = "budget_optimizer"
 
+    SYSTEM_PROMPT = """Você é um especialista em otimização de orçamento para Meta Ads.
+Sua função é redistribuir o budget de forma inteligente para maximizar o ROAS global.
 
-class BudgetOptimizerService:
-    def __init__(self, session: AsyncSession):
-        self._s = session
+Regras:
+- Nunca reduza mais de 30% de um budget de uma vez
+- Nunca aumente mais de 50% de uma vez
+- Se ROAS < 1.0 por mais de 3 dias: pause ou reduza 30%
+- Se ROAS > 3.0 por mais de 3 dias: aumente até 30%
+- Mantenha pelo menos 20% do budget para testes
+- Considere o histórico de ajustes anteriores
+
+Responda em JSON com:
+{
+  "total_budget_atual": número,
+  "recomendacoes": [
+    {
+      "campaign_id": "id",
+      "campaign_name": "nome",
+      "budget_atual": número,
+      "budget_sugerido": número,
+      "variacao_pct": número,
+      "razao": "texto",
+      "prioridade": "alta|media|baixa"
+    }
+  ],
+  "resumo": "texto explicativo"
+}"""
 
     async def run(self, tenant_id: str) -> dict[str, Any]:
-        since = datetime.utcnow() - timedelta(days=3)  # 3 dias para ter dados suficientes
-        accounts = await self._get_accounts(tenant_id)
-        actions_taken = []
+        self._tenant_id = tenant_id
 
-        for account in accounts:
-            client = MetaAdsClient(account.access_token, account.ad_account_id)
-            try:
-                account_actions = await self._optimize_account(account, client, since, tenant_id)
-                actions_taken.extend(account_actions)
-            except Exception as exc:
-                logger.error("budget_optimizer.account_error", account=account.name, error=str(exc))
-            finally:
-                await client.close()
+        # 1. Ler insights do Analyst e decisões do Decision
+        analyst_data = await self.read_knowledge(
+            source_agent="analyst", entry_type="insight", only_unread=False, limit=3
+        )
+        decision_data = await self.read_knowledge(
+            source_agent="decision", entry_type="decision", only_unread=True, limit=10
+        )
 
-        summary = self._build_summary(actions_taken)
-        await self._save_insight(tenant_id, summary, actions_taken)
-        logger.info("budget_optimizer.done", tenant_id=tenant_id, actions=len(actions_taken))
-        return {"actions": actions_taken, "summary": summary}
+        # 2. Buscar dados de budget e ROAS por campanha (últimos 7 dias)
+        since_7d = datetime.utcnow() - timedelta(days=7)
+        campaign_data = await self._get_campaign_budgets_and_roas(tenant_id, since_7d)
 
-    # ------------------------------------------------------------------
+        if not campaign_data:
+            return {"message": "Sem campanhas com dados suficientes", "recommendations": []}
 
-    async def _optimize_account(self, account, client: MetaAdsClient, since: datetime, tenant_id: str) -> list[dict]:
-        actions = []
+        # 3. Recuperar histórico de ajustes anteriores
+        past_adjustments = await self.recall(memory_type="decision", limit=15)
+        past_results = await self.recall(memory_type="outcome", limit=10)
 
-        campaigns_data = await self._get_campaign_metrics(str(account.id), since)
+        history_text = self._format_history(past_adjustments, past_results)
+        analyst_summary = analyst_data[0]["summary"] if analyst_data else "Sem análise disponível"
+        decision_summary = "\n".join([d["summary"] for d in decision_data]) if decision_data else "Sem decisões"
 
-        for camp in campaigns_data:
-            spend = camp["spend"]
-            roas = camp["roas"]
-            conversions = camp["conversions"]
-            daily_budget = camp["daily_budget"]
-            campaign_id = camp["meta_id"]
-            name = camp["name"]
+        # 4. Claude calcula redistribuição ótima
+        raw_response = await self.ai_think(
+            system_prompt=self.SYSTEM_PROMPT,
+            user_message=f"""Otimize o budget das seguintes campanhas:
 
-            if spend < MIN_SPEND_TO_ACT:
-                continue
+CAMPANHAS E PERFORMANCE:
+{json.dumps(campaign_data, ensure_ascii=False, indent=2)}
 
-            # Pausar: zero conversões com muito gasto
-            if conversions == 0 and spend > PAUSE_NO_CONV_SPEND:
-                try:
-                    await client.update_campaign_status(campaign_id, "PAUSED")
-                    actions.append({
-                        "type": "pause",
-                        "campaign": name,
-                        "reason": f"R${spend:.0f} gastos sem nenhuma conversão",
-                        "before": "ACTIVE",
-                        "after": "PAUSED",
-                    })
-                    await self._log_action(tenant_id, "PAUSE_CAMPAIGN", campaign_id, f"0 conversões, R${spend:.0f} gasto")
-                except Exception as e:
-                    logger.warning("budget_optimizer.pause_failed", campaign=name, error=str(e))
+ANÁLISE ATUAL DO SISTEMA:
+{analyst_summary}
 
-            # Pausar: ROAS crítico
-            elif roas > 0 and roas < PAUSE_ROAS and spend > 80:
-                try:
-                    await client.update_campaign_status(campaign_id, "PAUSED")
-                    actions.append({
-                        "type": "pause",
-                        "campaign": name,
-                        "reason": f"ROAS {roas:.2f}x — prejuízo confirmado (gasto R${spend:.0f})",
-                        "before": "ACTIVE",
-                        "after": "PAUSED",
-                    })
-                    await self._log_action(tenant_id, "PAUSE_CAMPAIGN", campaign_id, f"ROAS {roas:.2f}x")
-                except Exception as e:
-                    logger.warning("budget_optimizer.pause_failed", campaign=name, error=str(e))
+DECISÕES DO AGENTE DECISOR:
+{decision_summary}
 
-            # Escalar: ROAS excelente
-            elif roas >= SCALE_UP_ROAS and daily_budget and daily_budget > 0:
-                new_budget = int(daily_budget * (1 + SCALE_UP_PCT) * 100)
-                new_budget = min(new_budget, MAX_DAILY_BUDGET)
-                if new_budget > daily_budget * 100:
-                    try:
-                        await client.update_campaign_budget(campaign_id, new_budget)
-                        actions.append({
-                            "type": "scale_up",
-                            "campaign": name,
-                            "reason": f"ROAS {roas:.2f}x excelente — escalando orçamento",
-                            "before": f"R${daily_budget:.2f}/dia",
-                            "after": f"R${new_budget/100:.2f}/dia",
-                        })
-                        await self._log_action(tenant_id, "SCALE_BUDGET_UP", campaign_id, f"ROAS {roas:.2f}x, +{SCALE_UP_PCT*100:.0f}%")
-                    except Exception as e:
-                        logger.warning("budget_optimizer.scale_up_failed", campaign=name, error=str(e))
+HISTÓRICO DE AJUSTES ANTERIORES:
+{history_text}
 
-            # Reduzir: ROAS fraco
-            elif 0 < roas < SCALE_DOWN_ROAS and daily_budget and daily_budget > 0:
-                new_budget = int(daily_budget * (1 - SCALE_DOWN_PCT) * 100)
-                new_budget = max(new_budget, MIN_DAILY_BUDGET)
-                if new_budget < daily_budget * 100:
-                    try:
-                        await client.update_campaign_budget(campaign_id, new_budget)
-                        actions.append({
-                            "type": "scale_down",
-                            "campaign": name,
-                            "reason": f"ROAS {roas:.2f}x abaixo do aceitável — reduzindo orçamento",
-                            "before": f"R${daily_budget:.2f}/dia",
-                            "after": f"R${new_budget/100:.2f}/dia",
-                        })
-                        await self._log_action(tenant_id, "SCALE_BUDGET_DOWN", campaign_id, f"ROAS {roas:.2f}x, -{SCALE_DOWN_PCT*100:.0f}%")
-                    except Exception as e:
-                        logger.warning("budget_optimizer.scale_down_failed", campaign=name, error=str(e))
+Calcule a redistribuição ótima em JSON.""",
+            max_tokens=2000,
+        )
 
-        return actions
+        recommendations = self._parse_recommendations(raw_response)
 
-    async def _get_campaign_metrics(self, account_id: str, since: datetime) -> list[dict]:
-        r = await self._s.execute(
+        # 5. Salvar cada recomendação na memória
+        for rec in recommendations.get("recomendacoes", []):
+            await self.remember(
+                key=f"budget_adj_{rec.get('campaign_id', 'unknown')}_{datetime.utcnow().strftime('%Y%m%d')}",
+                content=rec,
+                memory_type="decision",
+                importance=7,
+                ttl_days=14,
+            )
+
+            # Criar AgentAction para o Executor
+            if abs(rec.get("variacao_pct", 0)) > 5:
+                action = AgentAction(
+                    tenant_id=tenant_id,
+                    action_type="AJUSTAR_BUDGET",
+                    entity_type="campaign",
+                    entity_id=rec.get("campaign_id"),
+                    payload=rec,
+                    status="pending",
+                )
+                self._s.add(action)
+
+        await self._s.flush()
+
+        # 6. Publicar resultados para o Executor e Reporter
+        await self.publish_knowledge(
+            topic="budget_optimization",
+            entry_type="recommendation",
+            content=recommendations,
+            summary=recommendations.get("resumo", "Otimização de budget calculada"),
+            confidence=0.85,
+            ttl_hours=12,
+        )
+
+        logger.info("budget_optimizer.done", tenant_id=tenant_id,
+                    recs=len(recommendations.get("recomendacoes", [])))
+        return recommendations
+
+    def _format_history(self, past_adj: list, past_res: list) -> str:
+        if not past_adj:
+            return "Nenhum ajuste anterior registrado."
+        lines = []
+        for adj in past_adj[:5]:
+            c = adj["content"]
+            lines.append(
+                f"- {c.get('campaign_name', '?')}: {c.get('variacao_pct', 0):+.0f}% "
+                f"(Budget: R${c.get('budget_atual', 0):.0f} → R${c.get('budget_sugerido', 0):.0f})"
+            )
+        return "\n".join(lines)
+
+    def _parse_recommendations(self, raw: str) -> dict:
+        try:
+            start = raw.find("{")
+            end = raw.rfind("}") + 1
+            if start >= 0:
+                return json.loads(raw[start:end])
+        except Exception:
+            pass
+        return {"recomendacoes": [], "resumo": raw[:300]}
+
+    async def _get_campaign_budgets_and_roas(self, tenant_id: str, since: datetime) -> list[dict]:
+        result = await self._s.execute(
             select(
-                Campaign.meta_campaign_id,
+                Campaign.id,
                 Campaign.name,
                 Campaign.daily_budget,
-                Campaign.status,
-                func.sum(AdMetric.spend).label("spend"),
+                Campaign.lifetime_budget,
+                func.sum(AdMetric.spend).label("spend_7d"),
+                func.avg(AdMetric.roas).label("avg_roas"),
+                func.avg(AdMetric.ctr).label("avg_ctr"),
                 func.sum(AdMetric.conversions).label("conversions"),
-                func.sum(AdMetric.revenue).label("revenue"),
-                func.avg(AdMetric.roas).label("roas"),
             )
+            .join(MetaAccount, Campaign.meta_account_id == MetaAccount.id)
             .join(AdSet, Campaign.id == AdSet.campaign_id)
             .join(Ad, AdSet.id == Ad.adset_id)
             .join(AdMetric, Ad.id == AdMetric.ad_id)
             .where(
-                Campaign.meta_account_id == account_id,
-                Campaign.status == "ACTIVE",
-                AdMetric.date >= since,
+                and_(
+                    MetaAccount.tenant_id == tenant_id,
+                    AdMetric.date >= since,
+                )
             )
-            .group_by(Campaign.id, Campaign.meta_campaign_id, Campaign.name, Campaign.daily_budget, Campaign.status)
+            .group_by(Campaign.id, Campaign.name, Campaign.daily_budget, Campaign.lifetime_budget)
+            .having(func.sum(AdMetric.spend) > 0)
         )
         return [
             {
-                "meta_id": row.meta_campaign_id,
-                "name": row.name,
-                "daily_budget": float(row.daily_budget) if row.daily_budget else None,
-                "spend": float(row.spend or 0),
-                "conversions": int(row.conversions or 0),
-                "revenue": float(row.revenue or 0),
-                "roas": float(row.roas or 0),
+                "campaign_id": str(r.id),
+                "campaign_name": r.name,
+                "daily_budget": float(r.daily_budget or 0),
+                "spend_7d": round(float(r.spend_7d or 0), 2),
+                "avg_roas": round(float(r.avg_roas or 0), 2),
+                "avg_ctr": round(float(r.avg_ctr or 0), 2),
+                "conversions_7d": int(r.conversions or 0),
             }
-            for row in r.all()
+            for r in result.all()
         ]
-
-    async def _get_accounts(self, tenant_id: str):
-        r = await self._s.execute(
-            select(MetaAccount).where(
-                MetaAccount.tenant_id == tenant_id,
-                MetaAccount.is_active == True,
-            )
-        )
-        return r.scalars().all()
-
-    def _build_summary(self, actions: list[dict]) -> str:
-        if not actions:
-            return "Nenhuma otimização necessária — todas as campanhas dentro dos parâmetros."
-        paused = len([a for a in actions if a["type"] == "pause"])
-        scaled_up = len([a for a in actions if a["type"] == "scale_up"])
-        scaled_down = len([a for a in actions if a["type"] == "scale_down"])
-        parts = []
-        if paused: parts.append(f"{paused} campanha(s) pausada(s)")
-        if scaled_up: parts.append(f"{scaled_up} campanha(s) escalada(s)")
-        if scaled_down: parts.append(f"{scaled_down} campanha(s) com orçamento reduzido")
-        return "Otimizações realizadas: " + ", ".join(parts) + "."
-
-    async def _log_action(self, tenant_id: str, action_type: str, entity_id: str, reason: str):
-        from app.db.models import AgentAction as AgentActionModel
-        action = AgentActionModel(
-            tenant_id=tenant_id,
-            action_type=action_type,
-            entity_type="campaign",
-            entity_id=entity_id,
-            payload={"reason": reason},
-            status="executed",
-        )
-        self._s.add(action)
-
-    async def _save_insight(self, tenant_id: str, summary: str, actions: list):
-        import json
-        from sqlalchemy import text, bindparam, String
-        title = f"Otimização de Orçamento — {datetime.now().strftime('%d/%m/%Y %H:%M')}"
-        details_json = json.dumps({"actions": actions}, ensure_ascii=False, default=str)
-        await self._s.execute(
-            text(
-                "INSERT INTO agent_insights (tenant_id, agent_name, title, summary, details, actions_taken)"
-                " VALUES (:tid, 'budget_optimizer', :title, :summary, to_jsonb(:details), :cnt)"
-            ).bindparams(bindparam("details", type_=String())),
-            {
-                "tid": tenant_id,
-                "title": title,
-                "summary": summary,
-                "details": details_json,
-                "cnt": len(actions),
-            },
-        )
-        await self._s.flush()

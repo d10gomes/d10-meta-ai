@@ -1,423 +1,285 @@
 """
-Analyst Agent — Especialista em análise de performance de Meta Ads.
-
-Analisa todas as campanhas do tenant, calcula KPIs, identifica padrões,
-detecta oportunidades e gera um relatório executivo detalhado em português.
-Roda diariamente às 07h00.
+Analyst Agent — Papel: ANALISTA DE PERFORMANCE
+- Lê os dados brutos publicados pelo Scanner
+- Usa Claude para identificar padrões, tendências e anomalias reais
+- Publica insights na Knowledge Base para o Optimizer e Decision lerem
+- Mantém memória do histórico de análises anteriores para comparação
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.base import AgentBase
 from app.core.logging import logger
-from app.db.models import Campaign, AdSet, Ad, AdMetric, MetaAccount
+from app.db.models import Campaign, AdSet, Ad, AdMetric, MetaAccount, AgentInsight, Tenant
 
 
-class AnalystService:
-    def __init__(self, session: AsyncSession):
-        self._s = session
+class AnalystService(AgentBase):
+    name = "analyst"
 
-    # ------------------------------------------------------------------
+    SYSTEM_PROMPT = """Você é um especialista sênior em Meta Ads com 10 anos de experiência.
+Analise os dados de campanhas fornecidos e identifique:
+1. Tendências de performance (melhora ou piora)
+2. Anomalias (gastos anormais, CTR muito baixo, ROAS negativo)
+3. Oportunidades de otimização específicas e acionáveis
+4. Campanhas que precisam de atenção imediata
+
+Responda SEMPRE em português brasileiro.
+Seja direto e específico — mencione nomes de campanhas, valores exatos.
+Priorize insights que podem gerar ação imediata."""
+
     async def run(self, tenant_id: str) -> dict[str, Any]:
-        """Full analysis pipeline. Returns the insight dict."""
+        self._tenant_id = tenant_id
+
+        # 1. Ler o que o Scanner publicou
+        scanner_data = await self.read_knowledge(
+            source_agent="scanner",
+            entry_type="raw_data",
+            only_unread=False,
+            limit=10,
+        )
+
+        # 2. Buscar KPIs do banco diretamente
         since_7d = datetime.utcnow() - timedelta(days=7)
         since_30d = datetime.utcnow() - timedelta(days=30)
-
-        accounts = await self._get_accounts(tenant_id)
-        if not accounts:
-            return self._empty_report(tenant_id)
-
         kpis_7d = await self._aggregate_kpis(tenant_id, since_7d)
         kpis_30d = await self._aggregate_kpis(tenant_id, since_30d)
         top_campaigns = await self._top_campaigns(tenant_id, since_7d, limit=5)
         worst_campaigns = await self._worst_campaigns(tenant_id, since_7d, limit=5)
-        account_breakdown = await self._account_breakdown(tenant_id, since_7d)
-        alerts = await self._generate_alerts(tenant_id, since_7d)
-        recommendations = self._build_recommendations(kpis_7d, top_campaigns, worst_campaigns, alerts)
 
-        title = f"Análise de Performance — {datetime.now().strftime('%d/%m/%Y')}"
-        summary = self._executive_summary(kpis_7d, kpis_30d, top_campaigns, alerts)
+        # 3. Recuperar análises anteriores da memória para comparação
+        past_analyses = await self.recall(memory_type="observation", limit=5)
+        past_context = ""
+        if past_analyses:
+            last = past_analyses[0]["content"]
+            past_context = f"""
+Na última análise ({past_analyses[0]['created_at'][:10]}):
+- ROAS médio: {last.get('avg_roas', 'N/A')}
+- CTR médio: {last.get('avg_ctr', 'N/A')}%
+- Gasto total 7d: R$ {last.get('total_spend_7d', 'N/A')}
+- Principais problemas: {', '.join(last.get('top_issues', []))}
+"""
 
-        details = {
-            "period": "últimos 7 dias",
-            "accounts_count": len(accounts),
+        # 4. Chamar Claude para análise real
+        if kpis_7d.get("total_spend", 0) > 0 or scanner_data:
+            data_para_analise = {
+                "periodo": "últimos 7 dias",
+                "kpis_7d": kpis_7d,
+                "kpis_30d": kpis_30d,
+                "top_5_campanhas": top_campaigns,
+                "piores_5_campanhas": worst_campaigns,
+                "dados_scanner": [e["summary"] for e in scanner_data[:3]],
+                "historico": past_context,
+            }
+
+            ai_analysis = await self.ai_think(
+                system_prompt=self.SYSTEM_PROMPT,
+                user_message=f"""Analise esses dados de Meta Ads e forneça insights acionáveis:
+
+{json.dumps(data_para_analise, ensure_ascii=False, indent=2)}
+
+Estruture sua resposta em:
+## Situação Geral
+## Alertas Urgentes (se houver)
+## Top Oportunidades (3-5 ações concretas)
+## Comparação com período anterior""",
+                max_tokens=1500,
+            )
+        else:
+            ai_analysis = "Sem dados suficientes para análise. Aguardando primeiras coletas do Scanner."
+
+        # 5. Detectar alertas por regras (complemento ao Claude)
+        alerts = self._rule_based_alerts(kpis_7d, worst_campaigns)
+
+        # 6. Salvar na memória para comparações futuras
+        await self.remember(
+            key=f"analysis_{datetime.utcnow().strftime('%Y%m%d')}",
+            content={
+                "avg_roas": kpis_7d.get("avg_roas"),
+                "avg_ctr": kpis_7d.get("avg_ctr"),
+                "total_spend_7d": kpis_7d.get("total_spend"),
+                "top_issues": [a["issue"] for a in alerts[:3]],
+                "campaigns_analyzed": len(top_campaigns) + len(worst_campaigns),
+            },
+            memory_type="observation",
+            importance=7,
+            ttl_days=30,
+        )
+
+        # 7. Publicar na Knowledge Base para outros agentes
+        await self.publish_knowledge(
+            topic="performance_analysis",
+            entry_type="insight",
+            content={
+                "ai_analysis": ai_analysis,
+                "kpis_7d": kpis_7d,
+                "kpis_30d": kpis_30d,
+                "top_campaigns": top_campaigns,
+                "worst_campaigns": worst_campaigns,
+                "alerts": alerts,
+            },
+            summary=ai_analysis[:500] if ai_analysis else "Análise vazia",
+            confidence=0.9,
+            ttl_hours=24,
+        )
+
+        # Publicar alertas separadamente com alta prioridade
+        for alert in alerts:
+            await self.publish_knowledge(
+                topic=f"alert_{alert['type']}",
+                entry_type="alert",
+                content=alert,
+                summary=alert["message"],
+                confidence=1.0,
+                ttl_hours=12,
+            )
+
+        # 8. Salvar insight no banco para o frontend ver
+        await self._save_insight(tenant_id, ai_analysis, kpis_7d, alerts)
+
+        result = {
+            "tenant_id": tenant_id,
+            "ai_analysis": ai_analysis,
             "kpis_7d": kpis_7d,
-            "kpis_30d": kpis_30d,
-            "variation_pct": self._variation(kpis_7d, kpis_30d),
-            "top_campaigns": top_campaigns,
-            "worst_campaigns": worst_campaigns,
-            "account_breakdown": account_breakdown,
-            "alerts": alerts,
-            "recommendations": recommendations,
+            "alerts_count": len(alerts),
+            "ran_at": datetime.utcnow().isoformat(),
         }
-
-        await self._save_insight(tenant_id, "analyst", title, summary, details)
         logger.info("analyst.done", tenant_id=tenant_id, alerts=len(alerts))
-        return details
+        return result
 
-    # ------------------------------------------------------------------
-    # Data fetchers
-    # ------------------------------------------------------------------
-
-    async def _get_accounts(self, tenant_id: str):
-        r = await self._s.execute(
-            select(MetaAccount).where(
-                MetaAccount.tenant_id == tenant_id,
-                MetaAccount.is_active == True,
-            )
-        )
-        return r.scalars().all()
-
-    async def _aggregate_kpis(self, tenant_id: str, since: datetime) -> dict:
-        r = await self._s.execute(
-            select(
-                func.coalesce(func.sum(AdMetric.spend), 0).label("spend"),
-                func.coalesce(func.sum(AdMetric.impressions), 0).label("impressions"),
-                func.coalesce(func.sum(AdMetric.clicks), 0).label("clicks"),
-                func.coalesce(func.sum(AdMetric.conversions), 0).label("conversions"),
-                func.coalesce(func.sum(AdMetric.revenue), 0).label("revenue"),
-                func.coalesce(func.avg(AdMetric.ctr), 0).label("ctr"),
-                func.coalesce(func.avg(AdMetric.cpm), 0).label("cpm"),
-                func.coalesce(func.avg(AdMetric.cpa), 0).label("cpa"),
-                func.coalesce(func.avg(AdMetric.roas), 0).label("roas"),
-                func.coalesce(func.avg(AdMetric.frequency), 0).label("frequency"),
-            )
-            .join(Ad, AdMetric.ad_id == Ad.id)
-            .join(AdSet, Ad.adset_id == AdSet.id)
-            .join(Campaign, AdSet.campaign_id == Campaign.id)
-            .join(MetaAccount, Campaign.meta_account_id == MetaAccount.id)
-            .where(
-                MetaAccount.tenant_id == tenant_id,
-                AdMetric.date >= since,
-            )
-        )
-        row = r.one()
-        spend = float(row.spend)
-        revenue = float(row.revenue)
-        conversions = int(row.conversions)
-        roas = round(revenue / spend, 2) if spend > 0 else 0.0
-
-        return {
-            "spend": round(spend, 2),
-            "impressions": int(row.impressions),
-            "clicks": int(row.clicks),
-            "conversions": conversions,
-            "revenue": round(revenue, 2),
-            "ctr": round(float(row.ctr), 3),
-            "cpm": round(float(row.cpm), 2),
-            "cpa": round(float(row.cpa), 2),
-            "roas": roas,
-            "frequency": round(float(row.frequency), 2),
-        }
-
-    async def _top_campaigns(self, tenant_id: str, since: datetime, limit: int) -> list[dict]:
-        r = await self._s.execute(
-            select(
-                Campaign.name,
-                Campaign.meta_campaign_id,
-                func.sum(AdMetric.spend).label("spend"),
-                func.sum(AdMetric.conversions).label("conversions"),
-                func.sum(AdMetric.revenue).label("revenue"),
-                func.avg(AdMetric.roas).label("roas"),
-                func.avg(AdMetric.ctr).label("ctr"),
-                func.avg(AdMetric.cpa).label("cpa"),
-            )
-            .join(AdSet, Campaign.id == AdSet.campaign_id)
-            .join(Ad, AdSet.id == Ad.adset_id)
-            .join(AdMetric, Ad.id == AdMetric.ad_id)
-            .join(MetaAccount, Campaign.meta_account_id == MetaAccount.id)
-            .where(
-                MetaAccount.tenant_id == tenant_id,
-                AdMetric.date >= since,
-                AdMetric.spend > 0,
-            )
-            .group_by(Campaign.id, Campaign.name, Campaign.meta_campaign_id)
-            .order_by(func.avg(AdMetric.roas).desc().nullslast())
-            .limit(limit)
-        )
-        return [
-            {
-                "name": row.name,
-                "id": row.meta_campaign_id,
-                "spend": round(float(row.spend or 0), 2),
-                "conversions": int(row.conversions or 0),
-                "revenue": round(float(row.revenue or 0), 2),
-                "roas": round(float(row.roas or 0), 2),
-                "ctr": round(float(row.ctr or 0), 3),
-                "cpa": round(float(row.cpa or 0), 2),
-                "grade": self._grade(float(row.roas or 0), float(row.ctr or 0), float(row.cpa or 0)),
-            }
-            for row in r.all()
-        ]
-
-    async def _worst_campaigns(self, tenant_id: str, since: datetime, limit: int) -> list[dict]:
-        r = await self._s.execute(
-            select(
-                Campaign.name,
-                Campaign.meta_campaign_id,
-                func.sum(AdMetric.spend).label("spend"),
-                func.sum(AdMetric.conversions).label("conversions"),
-                func.avg(AdMetric.roas).label("roas"),
-                func.avg(AdMetric.ctr).label("ctr"),
-                func.avg(AdMetric.cpa).label("cpa"),
-                func.avg(AdMetric.frequency).label("frequency"),
-            )
-            .join(AdSet, Campaign.id == AdSet.campaign_id)
-            .join(Ad, AdSet.id == Ad.adset_id)
-            .join(AdMetric, Ad.id == AdMetric.ad_id)
-            .join(MetaAccount, Campaign.meta_account_id == MetaAccount.id)
-            .where(
-                MetaAccount.tenant_id == tenant_id,
-                AdMetric.date >= since,
-                AdMetric.spend > 10,
-            )
-            .group_by(Campaign.id, Campaign.name, Campaign.meta_campaign_id)
-            .order_by(func.avg(AdMetric.roas).asc().nullsfirst())
-            .limit(limit)
-        )
-        return [
-            {
-                "name": row.name,
-                "id": row.meta_campaign_id,
-                "spend": round(float(row.spend or 0), 2),
-                "conversions": int(row.conversions or 0),
-                "roas": round(float(row.roas or 0), 2),
-                "ctr": round(float(row.ctr or 0), 3),
-                "cpa": round(float(row.cpa or 0), 2),
-                "frequency": round(float(row.frequency or 0), 2),
-                "problem": self._diagnose_problem(float(row.roas or 0), float(row.ctr or 0), float(row.cpa or 0), float(row.frequency or 0), float(row.spend or 0), int(row.conversions or 0)),
-            }
-            for row in r.all()
-        ]
-
-    async def _account_breakdown(self, tenant_id: str, since: datetime) -> list[dict]:
-        r = await self._s.execute(
-            select(
-                MetaAccount.name,
-                MetaAccount.ad_account_id,
-                func.sum(AdMetric.spend).label("spend"),
-                func.sum(AdMetric.conversions).label("conversions"),
-                func.sum(AdMetric.revenue).label("revenue"),
-                func.avg(AdMetric.roas).label("roas"),
-                func.count(func.distinct(Campaign.id)).label("campaigns"),
-            )
-            .join(Campaign, MetaAccount.id == Campaign.meta_account_id)
-            .join(AdSet, Campaign.id == AdSet.campaign_id)
-            .join(Ad, AdSet.id == Ad.adset_id)
-            .join(AdMetric, Ad.id == AdMetric.ad_id)
-            .where(
-                MetaAccount.tenant_id == tenant_id,
-                AdMetric.date >= since,
-            )
-            .group_by(MetaAccount.id, MetaAccount.name, MetaAccount.ad_account_id)
-            .order_by(func.sum(AdMetric.spend).desc())
-        )
-        return [
-            {
-                "account": row.name,
-                "spend": round(float(row.spend or 0), 2),
-                "conversions": int(row.conversions or 0),
-                "revenue": round(float(row.revenue or 0), 2),
-                "roas": round(float(row.roas or 0), 2),
-                "campaigns": int(row.campaigns or 0),
-            }
-            for row in r.all()
-        ]
-
-    async def _generate_alerts(self, tenant_id: str, since: datetime) -> list[dict]:
+    def _rule_based_alerts(self, kpis: dict, worst: list) -> list[dict]:
         alerts = []
-
-        # Ads queimando dinheiro (gasto alto, 0 conversões)
-        r = await self._s.execute(
-            select(Ad.name, Campaign.name.label("campaign"), func.sum(AdMetric.spend).label("spend"))
-            .join(AdMetric, Ad.id == AdMetric.ad_id)
-            .join(AdSet, Ad.adset_id == AdSet.id)
-            .join(Campaign, AdSet.campaign_id == Campaign.id)
-            .join(MetaAccount, Campaign.meta_account_id == MetaAccount.id)
-            .where(
-                MetaAccount.tenant_id == tenant_id,
-                AdMetric.date >= since,
-                Ad.status == "ACTIVE",
-            )
-            .group_by(Ad.id, Ad.name, Campaign.name)
-            .having(
-                func.sum(AdMetric.spend) > 50,
-                func.sum(AdMetric.conversions) == 0,
-            )
-        )
-        for row in r.all():
+        if kpis.get("avg_roas", 999) < 1.0 and kpis.get("total_spend", 0) > 0:
             alerts.append({
-                "type": "money_burner",
+                "type": "negative_roas",
                 "severity": "critical",
-                "message": f"🔥 Anúncio '{row.name}' gastou R${float(row.spend):.0f} sem nenhuma conversão",
-                "campaign": row.campaign,
+                "issue": "ROAS abaixo de 1.0",
+                "message": f"ROAS médio {kpis['avg_roas']:.2f} — gastando mais do que recebendo",
             })
-
-        # Frequência alta (fadiga de anúncio)
-        r2 = await self._s.execute(
-            select(Ad.name, Campaign.name.label("campaign"), func.avg(AdMetric.frequency).label("freq"))
-            .join(AdMetric, Ad.id == AdMetric.ad_id)
-            .join(AdSet, Ad.adset_id == AdSet.id)
-            .join(Campaign, AdSet.campaign_id == Campaign.id)
-            .join(MetaAccount, Campaign.meta_account_id == MetaAccount.id)
-            .where(
-                MetaAccount.tenant_id == tenant_id,
-                AdMetric.date >= since,
-                Ad.status == "ACTIVE",
-            )
-            .group_by(Ad.id, Ad.name, Campaign.name)
-            .having(func.avg(AdMetric.frequency) > 4.0)
-        )
-        for row in r2.all():
-            alerts.append({
-                "type": "high_frequency",
-                "severity": "high",
-                "message": f"😫 Anúncio '{row.name}' com frequência {float(row.freq):.1f}x — público saturado, precisa de criativo novo",
-                "campaign": row.campaign,
-            })
-
-        # CTR muito baixo
-        r3 = await self._s.execute(
-            select(Ad.name, Campaign.name.label("campaign"), func.avg(AdMetric.ctr).label("ctr"), func.sum(AdMetric.impressions).label("imps"))
-            .join(AdMetric, Ad.id == AdMetric.ad_id)
-            .join(AdSet, Ad.adset_id == AdSet.id)
-            .join(Campaign, AdSet.campaign_id == Campaign.id)
-            .join(MetaAccount, Campaign.meta_account_id == MetaAccount.id)
-            .where(
-                MetaAccount.tenant_id == tenant_id,
-                AdMetric.date >= since,
-                Ad.status == "ACTIVE",
-            )
-            .group_by(Ad.id, Ad.name, Campaign.name)
-            .having(
-                func.avg(AdMetric.ctr) < 0.5,
-                func.sum(AdMetric.impressions) > 2000,
-            )
-        )
-        for row in r3.all():
+        if kpis.get("avg_ctr", 999) < 0.5 and kpis.get("total_spend", 0) > 0:
             alerts.append({
                 "type": "low_ctr",
-                "severity": "medium",
-                "message": f"📉 Anúncio '{row.name}' com CTR {float(row.ctr):.2f}% ({int(row.imps):,} impressões) — criativo não está engajando",
-                "campaign": row.campaign,
+                "severity": "high",
+                "issue": "CTR muito baixo",
+                "message": f"CTR médio {kpis['avg_ctr']:.2f}% — criativos precisam de revisão",
             })
-
+        for camp in worst[:2]:
+            if camp.get("spend", 0) > 100 and camp.get("roas", 0) < 0.5:
+                alerts.append({
+                    "type": "drain_campaign",
+                    "severity": "high",
+                    "issue": f"Campanha drenando budget",
+                    "message": f"'{camp.get('name')}' gastou R${camp['spend']:.0f} com ROAS {camp.get('roas', 0):.2f}",
+                    "campaign_id": camp.get("id"),
+                })
         return alerts
 
-    # ------------------------------------------------------------------
-    # Intelligence / scoring
-    # ------------------------------------------------------------------
+    async def _save_insight(self, tenant_id: str, analysis: str, kpis: dict, alerts: list):
+        from sqlalchemy import String
+        from sqlalchemy.sql.expression import bindparam
+        insight = AgentInsight(
+            tenant_id=tenant_id,
+            agent_name=self.name,
+            title=f"Análise de Performance — {datetime.now().strftime('%d/%m/%Y %H:%M')}",
+            summary=analysis[:1000] if analysis else "Sem dados",
+            details={
+                "kpis": kpis,
+                "alerts": alerts,
+                "ai_powered": True,
+            },
+            actions_taken=len(alerts),
+        )
+        self._s.add(insight)
+        await self._s.flush()
 
-    def _grade(self, roas: float, ctr: float, cpa: float) -> str:
-        score = 0
-        if roas >= 4: score += 3
-        elif roas >= 2: score += 2
-        elif roas >= 1: score += 1
-        if ctr >= 2: score += 2
-        elif ctr >= 1: score += 1
-        if 0 < cpa < 50: score += 2
-        elif cpa < 100: score += 1
-        if score >= 6: return "S"
-        if score >= 4: return "A"
-        if score >= 2: return "B"
-        return "C"
+    async def _aggregate_kpis(self, tenant_id: str, since: datetime) -> dict:
+        result = await self._s.execute(
+            select(
+                func.sum(AdMetric.spend).label("total_spend"),
+                func.sum(AdMetric.revenue).label("total_revenue"),
+                func.sum(AdMetric.impressions).label("total_impressions"),
+                func.sum(AdMetric.clicks).label("total_clicks"),
+                func.sum(AdMetric.conversions).label("total_conversions"),
+                func.avg(AdMetric.roas).label("avg_roas"),
+                func.avg(AdMetric.ctr).label("avg_ctr"),
+                func.avg(AdMetric.cpc).label("avg_cpc"),
+                func.avg(AdMetric.cpm).label("avg_cpm"),
+            ).join(Ad, AdMetric.ad_id == Ad.id)
+            .join(AdSet, Ad.adset_id == AdSet.id)
+            .join(Campaign, AdSet.campaign_id == Campaign.id)
+            .join(MetaAccount, Campaign.meta_account_id == MetaAccount.id)
+            .where(
+                and_(
+                    MetaAccount.tenant_id == tenant_id,
+                    AdMetric.date >= since,
+                )
+            )
+        )
+        row = result.one_or_none()
+        if not row or not row.total_spend:
+            return {"total_spend": 0, "total_revenue": 0, "avg_roas": 0, "avg_ctr": 0}
 
-    def _diagnose_problem(self, roas: float, ctr: float, cpa: float, freq: float, spend: float, conversions: int) -> str:
-        if conversions == 0 and spend > 30:
-            return "Sem conversões — criativo ou público inadequado"
-        if roas < 0.5 and spend > 20:
-            return "ROAS negativo — prejuízo confirmado, pausar imediatamente"
-        if freq > 4:
-            return f"Frequência {freq:.1f}x — público esgotado, trocar criativo"
-        if ctr < 0.3:
-            return "CTR < 0.3% — anúncio não atrai cliques, revisar copy e imagem"
-        if cpa > 200:
-            return f"CPA R${cpa:.0f} — custo por conversão muito alto"
-        return "Performance abaixo da média"
-
-    def _variation(self, current: dict, previous: dict) -> dict:
-        def pct(a, b):
-            if b == 0:
-                return None
-            return round((a - b) / b * 100, 1)
+        spend = float(row.total_spend or 0)
+        revenue = float(row.total_revenue or 0)
         return {
-            "spend": pct(current["spend"], previous["spend"]),
-            "conversions": pct(current["conversions"], previous["conversions"]),
-            "roas": pct(current["roas"], previous["roas"]),
-            "ctr": pct(current["ctr"], previous["ctr"]),
+            "total_spend": round(spend, 2),
+            "total_revenue": round(revenue, 2),
+            "total_impressions": int(row.total_impressions or 0),
+            "total_clicks": int(row.total_clicks or 0),
+            "total_conversions": int(row.total_conversions or 0),
+            "avg_roas": round(float(row.avg_roas or 0), 2),
+            "avg_ctr": round(float(row.avg_ctr or 0), 2),
+            "avg_cpc": round(float(row.avg_cpc or 0), 2),
+            "avg_cpm": round(float(row.avg_cpm or 0), 2),
+            "overall_roas": round(revenue / spend, 2) if spend > 0 else 0,
         }
 
-    def _build_recommendations(self, kpis: dict, top: list, worst: list, alerts: list) -> list[str]:
-        recs = []
+    async def _top_campaigns(self, tenant_id: str, since: datetime, limit: int = 5) -> list[dict]:
+        return await self._campaign_ranking(tenant_id, since, limit, order="desc")
 
-        critical = [a for a in alerts if a["severity"] == "critical"]
-        if critical:
-            recs.append(f"🚨 URGENTE: {len(critical)} anúncio(s) gastando dinheiro sem retorno — pausar hoje")
+    async def _worst_campaigns(self, tenant_id: str, since: datetime, limit: int = 5) -> list[dict]:
+        return await self._campaign_ranking(tenant_id, since, limit, order="asc")
 
-        if kpis["roas"] < 1 and kpis["spend"] > 0:
-            recs.append("⛔ ROAS geral < 1x — a conta está no prejuízo. Revisar targeting e ofertas imediatamente")
-        elif kpis["roas"] < 2:
-            recs.append("⚠️ ROAS < 2x — performance abaixo do ideal. Focar orçamento nos top performers")
-        elif kpis["roas"] >= 3:
-            recs.append(f"✅ ROAS {kpis['roas']:.1f}x excelente — considerar aumentar orçamento nas campanhas vencedoras")
-
-        if kpis["frequency"] > 3.5:
-            recs.append(f"🔄 Frequência média {kpis['frequency']:.1f}x — renovar criativos para evitar fadiga do público")
-
-        if kpis["ctr"] < 0.8:
-            recs.append("📢 CTR geral baixo — testar novos criativos, headlines e chamadas para ação")
-
-        high_roas = [c for c in top if c["roas"] >= 3]
-        if high_roas:
-            names = ", ".join(c["name"][:25] for c in high_roas[:2])
-            recs.append(f"🚀 Escalar orçamento em: {names} (ROAS > 3x)")
-
-        zero_conv = [c for c in worst if c["conversions"] == 0 and c["spend"] > 50]
-        if zero_conv:
-            names = ", ".join(c["name"][:25] for c in zero_conv[:2])
-            recs.append(f"🛑 Pausar campanhas sem conversão: {names}")
-
-        if not recs:
-            recs.append("✅ Performance dentro do esperado — manter monitoramento contínuo")
-
-        return recs
-
-    def _executive_summary(self, k7: dict, k30: dict, top: list, alerts: list) -> str:
-        status = "CRÍTICO" if k7["roas"] < 1 else "ATENÇÃO" if k7["roas"] < 2 else "BOM" if k7["roas"] < 3 else "EXCELENTE"
-        criticos = len([a for a in alerts if a["severity"] == "critical"])
-        best = top[0]["name"][:30] if top else "N/A"
-
-        return (
-            f"Status da conta: {status} | "
-            f"Gasto 7d: R${k7['spend']:.0f} | "
-            f"ROAS: {k7['roas']:.2f}x | "
-            f"Conversões: {k7['conversions']} | "
-            f"Alertas críticos: {criticos} | "
-            f"Melhor campanha: {best}"
+    async def _campaign_ranking(self, tenant_id: str, since: datetime, limit: int, order: str) -> list[dict]:
+        col = func.avg(AdMetric.roas)
+        order_col = col.desc() if order == "desc" else col.asc()
+        result = await self._s.execute(
+            select(
+                Campaign.id,
+                Campaign.name,
+                func.sum(AdMetric.spend).label("spend"),
+                func.sum(AdMetric.revenue).label("revenue"),
+                func.avg(AdMetric.roas).label("roas"),
+                func.avg(AdMetric.ctr).label("ctr"),
+            )
+            .join(AdSet, Campaign.id == AdSet.campaign_id)
+            .join(Ad, AdSet.id == Ad.adset_id)
+            .join(AdMetric, Ad.id == AdMetric.ad_id)
+            .join(MetaAccount, Campaign.meta_account_id == MetaAccount.id)
+            .where(
+                and_(
+                    MetaAccount.tenant_id == tenant_id,
+                    AdMetric.date >= since,
+                    AdMetric.spend > 0,
+                )
+            )
+            .group_by(Campaign.id, Campaign.name)
+            .order_by(order_col)
+            .limit(limit)
         )
-
-    def _empty_report(self, tenant_id: str) -> dict:
-        return {"error": "Nenhuma conta ativa encontrada", "tenant_id": tenant_id}
-
-    async def _save_insight(self, tenant_id: str, agent_name: str, title: str, summary: str, details: dict):
-        import json
-        from sqlalchemy import text, bindparam, String
-        details_json = json.dumps(details, ensure_ascii=False, default=str)
-        await self._s.execute(
-            text(
-                "INSERT INTO agent_insights (tenant_id, agent_name, title, summary, details, actions_taken)"
-                " VALUES (:tid, :agent, :title, :summary, to_jsonb(:details), 0)"
-            ).bindparams(bindparam("details", type_=String())),
+        return [
             {
-                "tid": tenant_id,
-                "agent": agent_name,
-                "title": title,
-                "summary": summary,
-                "details": details_json,
-            },
-        )
-        await self._s.flush()
+                "id": str(r.id),
+                "name": r.name,
+                "spend": round(float(r.spend or 0), 2),
+                "revenue": round(float(r.revenue or 0), 2),
+                "roas": round(float(r.roas or 0), 2),
+                "ctr": round(float(r.ctr or 0), 2),
+            }
+            for r in result.all()
+        ]

@@ -1,107 +1,168 @@
-"""WhatsApp Agent — sends automatic reports via Evolution API / Meta Cloud API."""
+"""
+WhatsApp Agent — Papel: COMUNICADOR / REPORTER
+- Gera relatórios inteligentes combinando dados de todos os agentes
+- Envia via Evolution API ou Meta Cloud API
+- Lembra preferências de relatório do usuário e histórico de envios
+- Só envia se houver algo relevante para reportar
+"""
+from __future__ import annotations
+
+import json
 from datetime import datetime, timedelta
-from typing import List
+from typing import Any
 
 import httpx
-from sqlalchemy import select, func
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.base import AgentBase
 from app.core.config import settings
 from app.core.logging import logger
-from app.db.models import AdMetric, Ad, AdSet, Campaign, MetaAccount, WhatsAppReport, Tenant
-from app.infrastructure.repositories.diagnosis_repository import DiagnosisRepository
+from app.db.models import Tenant, MetaAccount
 
 
-class WhatsAppAgent:
-    def __init__(self, session: AsyncSession):
-        self._session = session
-        self._diagnosis_repo = DiagnosisRepository(session)
+class WhatsAppService(AgentBase):
+    name = "whatsapp"
 
-    async def send_report(self, tenant_id: str, report_type: str = "daily"):
-        tenant = await self._get_tenant(tenant_id)
-        if not tenant:
+    SYSTEM_PROMPT = """Você é um assistente especializado em criar relatórios de Meta Ads para WhatsApp.
+Os relatórios devem ser:
+- Concisos e diretos (máximo 5 parágrafos)
+- Escritos em português do Brasil
+- Usar emojis estrategicamente para destacar dados importantes
+- Incluir as métricas mais relevantes (gasto, ROAS, CTR)
+- Destacar ALERTAS CRÍTICOS primeiro
+- Terminar com 1-2 ações recomendadas
+
+Formato:
+📊 *Relatório D10 Meta AI* — {data}
+{alerta_critico_se_houver}
+💰 Gasto: R$ X | 📈 ROAS: X.Xx
+🎯 CTR médio: X.X% | Campanhas ativas: N
+{top_insight}
+✅ Ações recomendadas: {ações}"""
+
+    async def run(self, tenant_id: str) -> dict[str, Any]:
+        self._tenant_id = tenant_id
+
+        # 1. Coletar o que todos os outros agentes publicaram
+        analyst_data = await self.read_knowledge(
+            source_agent="analyst", entry_type="insight", only_unread=False, limit=1
+        )
+        alerts = await self.read_knowledge(entry_type="alert", only_unread=False, limit=5)
+        decisions = await self.read_knowledge(
+            source_agent="decision", entry_type="decision", only_unread=False, limit=5
+        )
+        creative_data = await self.read_knowledge(
+            source_agent="creative", entry_type="insight", only_unread=False, limit=1
+        )
+        budget_data = await self.read_knowledge(
+            source_agent="budget_optimizer", entry_type="recommendation", only_unread=False, limit=1
+        )
+
+        # 2. Verificar se já enviamos relatório recentemente
+        last_sent = await self.recall(memory_type="context", limit=1)
+        if last_sent:
+            last_at = last_sent[0]["content"].get("sent_at", "")
+            if last_at:
+                try:
+                    last_dt = datetime.fromisoformat(last_at)
+                    hours_since = (datetime.utcnow() - last_dt).total_seconds() / 3600
+                    if hours_since < 6:
+                        logger.info("whatsapp.skip_too_recent", hours_since=hours_since)
+                        return {"skipped": True, "reason": f"Último relatório enviado há {hours_since:.1f}h"}
+                except Exception:
+                    pass
+
+        # 3. Construir contexto para o Claude gerar o relatório
+        context_parts = []
+        if analyst_data:
+            context_parts.append(f"ANÁLISE: {analyst_data[0]['summary'][:600]}")
+        if alerts:
+            context_parts.append("ALERTAS: " + " | ".join([a["summary"] for a in alerts[:3]]))
+        if decisions:
+            context_parts.append("DECISÕES TOMADAS: " + " | ".join([d["summary"] for d in decisions[:3]]))
+        if creative_data:
+            context_parts.append(f"CRIATIVOS: {creative_data[0]['summary'][:300]}")
+        if budget_data:
+            context_parts.append(f"BUDGET: {budget_data[0]['summary'][:300]}")
+
+        # 4. Claude gera o relatório WhatsApp
+        report_text = await self.ai_think(
+            system_prompt=self.SYSTEM_PROMPT,
+            user_message=f"""Gere um relatório WhatsApp conciso para hoje ({datetime.now().strftime('%d/%m/%Y %H:%M')}):
+
+{chr(10).join(context_parts) or 'Sistema iniciado, aguardando primeiras coletas de dados.'}
+
+Escreva o relatório diretamente, pronto para envio.""",
+            max_tokens=800,
+        )
+
+        # 5. Buscar destinatários (tenants com WhatsApp configurado)
+        recipients = await self._get_recipients(tenant_id)
+        sent_count = 0
+
+        for phone in recipients:
+            try:
+                await self._send_whatsapp(phone, report_text)
+                sent_count += 1
+                logger.info("whatsapp.sent", phone=phone[-4:] + "****")
+            except Exception as exc:
+                logger.error("whatsapp.send_failed", phone=phone[-4:] + "****", error=str(exc))
+
+        # 6. Salvar na memória que enviamos
+        await self.remember(
+            key=f"report_sent_{datetime.utcnow().strftime('%Y%m%d_%H')}",
+            content={
+                "sent_at": datetime.utcnow().isoformat(),
+                "recipients": sent_count,
+                "report_preview": report_text[:200],
+                "had_alerts": len(alerts) > 0,
+            },
+            memory_type="context",
+            importance=5,
+            ttl_days=7,
+        )
+
+        # 7. Publicar na KB que o relatório foi gerado
+        await self.publish_knowledge(
+            topic="daily_report",
+            entry_type="report",
+            content={"report": report_text, "sent_to": sent_count},
+            summary=f"Relatório enviado para {sent_count} destinatário(s)",
+            confidence=1.0,
+            ttl_hours=8,
+        )
+
+        logger.info("whatsapp.done", tenant_id=tenant_id, sent=sent_count)
+        return {"sent": sent_count, "report_preview": report_text[:300]}
+
+    async def _send_whatsapp(self, phone: str, message: str) -> None:
+        """Send via Evolution API. Falls back gracefully if not configured."""
+        evolution_url = getattr(settings, "EVOLUTION_API_URL", None)
+        evolution_key = getattr(settings, "EVOLUTION_API_KEY", None)
+        evolution_instance = getattr(settings, "EVOLUTION_INSTANCE", "d10")
+
+        if not evolution_url or not evolution_key:
+            logger.warning("whatsapp.not_configured", phone=phone[-4:])
             return
 
-        body = await self._build_report(tenant_id, report_type, tenant.name)
-        phone = settings.WHATSAPP_DEFAULT_NUMBER
-
-        success = await self._send(phone, body)
-        await self._save_record(tenant_id, phone, report_type, body, success)
-        logger.info("whatsapp.report_sent", tenant=tenant_id, success=success)
-
-    async def _build_report(self, tenant_id: str, report_type: str, tenant_name: str) -> str:
-        since = datetime.utcnow() - timedelta(days=1 if report_type == "daily" else 7)
-
-        result = await self._session.execute(
-            select(
-                func.sum(AdMetric.spend).label("spend"),
-                func.sum(AdMetric.clicks).label("clicks"),
-                func.sum(AdMetric.impressions).label("impressions"),
-                func.sum(AdMetric.conversions).label("conversions"),
-                func.avg(AdMetric.ctr).label("ctr"),
-                func.avg(AdMetric.cpa).label("cpa"),
-                func.avg(AdMetric.roas).label("roas"),
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                f"{evolution_url}/message/sendText/{evolution_instance}",
+                headers={"apikey": evolution_key, "Content-Type": "application/json"},
+                json={"number": phone, "text": message},
             )
-            .join(Ad, AdMetric.ad_id == Ad.id)
-            .join(AdSet, Ad.adset_id == AdSet.id)
-            .join(Campaign, AdSet.campaign_id == Campaign.id)
-            .join(MetaAccount, Campaign.meta_account_id == MetaAccount.id)
+            resp.raise_for_status()
+
+    async def _get_recipients(self, tenant_id: str) -> list[str]:
+        result = await self._s.execute(
+            select(Tenant.whatsapp_number)
             .where(
-                MetaAccount.tenant_id == tenant_id,
-                AdMetric.date >= since,
+                Tenant.id == tenant_id,
+                Tenant.whatsapp_number.isnot(None),
             )
         )
-        row = result.one()
-
-        diagnoses = await self._diagnosis_repo.get_open_by_tenant(tenant_id)
-        alerts = len(diagnoses)
-
-        period = "📅 Hoje" if report_type == "daily" else "📅 Últimos 7 dias"
-
-        return (
-            f"*D10 META AI — Relatório {period}*\n"
-            f"🏢 {tenant_name}\n\n"
-            f"💰 Gasto: R$ {row.spend or 0:.2f}\n"
-            f"👆 Cliques: {row.clicks or 0:,}\n"
-            f"👁️ Impressões: {row.impressions or 0:,}\n"
-            f"🎯 Conversões: {row.conversions or 0}\n"
-            f"📊 CTR: {row.ctr or 0:.2f}%\n"
-            f"💵 CPA: R$ {row.cpa or 0:.2f}\n"
-            f"📈 ROAS: {row.roas or 0:.2f}x\n\n"
-            f"⚠️ Alertas ativos: {alerts}\n"
-            f"_Gerado por D10 META AI_"
-        )
-
-    async def _send(self, phone: str, message: str) -> bool:
-        if not settings.WHATSAPP_API_URL or not settings.WHATSAPP_API_TOKEN:
-            logger.warning("whatsapp.not_configured")
-            return False
-        try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.post(
-                    f"{settings.WHATSAPP_API_URL}/message/sendText/{phone}",
-                    headers={"apikey": settings.WHATSAPP_API_TOKEN},
-                    json={"number": phone, "text": message},
-                )
-                return resp.status_code == 200
-        except Exception as exc:
-            logger.error("whatsapp.send_failed", error=str(exc))
-            return False
-
-    async def _save_record(self, tenant_id: str, phone: str, report_type: str, content: str, success: bool):
-        record = WhatsAppReport(
-            tenant_id=tenant_id,
-            phone_number=phone,
-            report_type=report_type,
-            content=content,
-            status="sent" if success else "failed",
-            sent_at=datetime.utcnow() if success else None,
-        )
-        self._session.add(record)
-        await self._session.flush()
-
-    async def _get_tenant(self, tenant_id: str):
-        result = await self._session.execute(
-            select(Tenant).where(Tenant.id == tenant_id)
-        )
-        return result.scalar_one_or_none()
+        row = result.one_or_none()
+        if row and row.whatsapp_number:
+            return [row.whatsapp_number]
+        return []

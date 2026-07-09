@@ -243,3 +243,64 @@ class AgentInsight(Base):
     details = Column(JSON)
     actions_taken = Column(Integer, default=0)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+# ---------------------------------------------------------------------------
+# Agent Memory — persistent per-agent memory across runs
+# ---------------------------------------------------------------------------
+
+class AgentMemory(Base):
+    __tablename__ = "agent_memory"
+
+    id = Column(UUID(as_uuid=False), primary_key=True, default=_uuid)
+    agent_name = Column(String(80), nullable=False, index=True)
+    tenant_id = Column(UUID(as_uuid=False), ForeignKey("tenants.id"), nullable=False)
+    memory_type = Column(
+        Enum("observation", "decision", "outcome", "learning", "context", name="memory_type"),
+        nullable=False,
+    )
+    # Short label for retrieval (e.g. "campaign_123_budget_cut")
+    key = Column(String(200), nullable=False, index=True)
+    content = Column(JSON, nullable=False)
+    # 1-10: higher = more important, recalled first
+    importance = Column(Integer, default=5)
+    # How many times this memory was recalled
+    recall_count = Column(Integer, default=0)
+    last_recalled_at = Column(DateTime)
+    expires_at = Column(DateTime)  # None = permanent
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (UniqueConstraint("agent_name", "tenant_id", "key"),)
+
+
+# ---------------------------------------------------------------------------
+# Knowledge Base — shared between ALL agents
+# ---------------------------------------------------------------------------
+
+class KnowledgeEntry(Base):
+    __tablename__ = "knowledge_base"
+
+    id = Column(UUID(as_uuid=False), primary_key=True, default=_uuid)
+    tenant_id = Column(UUID(as_uuid=False), ForeignKey("tenants.id"), nullable=False)
+    # Which agent produced this knowledge
+    source_agent = Column(String(80), nullable=False, index=True)
+    entry_type = Column(
+        Enum(
+            "raw_data", "trend", "insight", "recommendation",
+            "alert", "report", "decision", "outcome",
+            name="knowledge_type",
+        ),
+        nullable=False,
+    )
+    topic = Column(String(200), nullable=False, index=True)
+    content = Column(JSON, nullable=False)
+    # AI-generated summary readable by other agents
+    summary = Column(Text)
+    # 0.0–1.0: how confident the source agent is
+    confidence = Column(Float, default=0.8)
+    # Which agents have already consumed this entry
+    consumed_by = Column(JSON, default=list)
+    expires_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
