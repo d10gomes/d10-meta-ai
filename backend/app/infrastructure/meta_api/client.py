@@ -1,0 +1,195 @@
+"""Meta Ads API client with retry logic."""
+from typing import Any, Dict, List, Optional
+
+import httpx
+from tenacity import retry, stop_after_attempt, wait_exponential
+
+from app.core.config import settings
+from app.core.exceptions import MetaAPIError
+from app.core.logging import logger
+
+BASE_URL = f"https://graph.facebook.com/{settings.META_API_VERSION}"
+
+INSIGHT_FIELDS = (
+    "impressions,clicks,spend,actions,action_values,"
+    "reach,frequency,ctr,cpc,cpm,cost_per_action_type"
+)
+
+
+class MetaAdsClient:
+    def __init__(self, access_token: str, ad_account_id: str = ""):
+        self.access_token = access_token
+        self.ad_account_id = ad_account_id
+        self._http = httpx.AsyncClient(timeout=30)
+
+    async def _get(self, path: str, params: Optional[Dict] = None) -> Dict:
+        params = params or {}
+        params["access_token"] = self.access_token
+        resp = await self._http.get(f"{BASE_URL}{path}", params=params)
+        data = resp.json()
+        if "error" in data:
+            raise MetaAPIError(data["error"].get("message", "Unknown error"))
+        return data
+
+    async def _post(self, path: str, params: Optional[Dict] = None, json: Optional[Dict] = None) -> Dict:
+        params = params or {}
+        params["access_token"] = self.access_token
+        resp = await self._http.post(f"{BASE_URL}{path}", params=params, json=json or {})
+        data = resp.json()
+        if "error" in data:
+            raise MetaAPIError(data["error"].get("message", "Unknown error"))
+        return data
+
+    # ── OAuth helpers ──────────────────────────────────────────────────────────
+
+    @staticmethod
+    def get_oauth_url(redirect_uri: str, state: str = "") -> str:
+        """Retorna a URL de autorização do Facebook OAuth."""
+        import urllib.parse
+        params = {
+            "client_id": settings.META_APP_ID,
+            "redirect_uri": redirect_uri,
+            "scope": "ads_read,ads_management,business_management,read_insights",
+            "response_type": "code",
+            "state": state,
+        }
+        # Usa config_id do Facebook Login for Business se disponível
+        if settings.META_CONFIG_ID:
+            params["config_id"] = settings.META_CONFIG_ID
+        return "https://www.facebook.com/dialog/oauth?" + urllib.parse.urlencode(params)
+
+    @staticmethod
+    async def exchange_code_for_token(code: str, redirect_uri: str) -> Dict:
+        """Troca o código OAuth por short-lived token."""
+        async with httpx.AsyncClient(timeout=15) as http:
+            resp = await http.get(
+                f"{BASE_URL}/oauth/access_token",
+                params={
+                    "client_id": settings.META_APP_ID,
+                    "client_secret": settings.META_APP_SECRET,
+                    "redirect_uri": redirect_uri,
+                    "code": code,
+                },
+            )
+            data = resp.json()
+            if "error" in data:
+                raise MetaAPIError(data["error"].get("message", "Token exchange failed"))
+            return data  # {"access_token": ..., "token_type": "bearer"}
+
+    @staticmethod
+    async def exchange_long_lived_token(short_token: str) -> Dict:
+        """Troca short-lived token por long-lived token (60 dias)."""
+        async with httpx.AsyncClient(timeout=15) as http:
+            resp = await http.get(
+                f"{BASE_URL}/oauth/access_token",
+                params={
+                    "grant_type": "fb_exchange_token",
+                    "client_id": settings.META_APP_ID,
+                    "client_secret": settings.META_APP_SECRET,
+                    "fb_exchange_token": short_token,
+                },
+            )
+            data = resp.json()
+            if "error" in data:
+                raise MetaAPIError(data["error"].get("message", "Long-lived token exchange failed"))
+            return data  # {"access_token": ..., "token_type": "bearer", "expires_in": ...}
+
+    async def validate_token(self) -> Dict:
+        """Valida o token e retorna informações do usuário/app."""
+        data = await self._get("/me", {"fields": "id,name"})
+        return data  # {"id": ..., "name": ...}
+
+    async def debug_token(self, token_to_debug: str) -> Dict:
+        """Inspeciona um token via /debug_token (requer app token)."""
+        app_token = f"{settings.META_APP_ID}|{settings.META_APP_SECRET}"
+        async with httpx.AsyncClient(timeout=15) as http:
+            resp = await http.get(
+                f"{BASE_URL}/debug_token",
+                params={
+                    "input_token": token_to_debug,
+                    "access_token": app_token,
+                },
+            )
+            return resp.json()
+
+    async def get_user_ad_accounts(self) -> List[Dict]:
+        """Lista todas as Ad Accounts acessíveis pelo token."""
+        data = await self._get(
+            "/me/adaccounts",
+            {"fields": "id,name,account_id,account_status,currency,timezone_name,business"},
+        )
+        return data.get("data", [])
+
+    # ── Campaigns / Adsets / Ads ───────────────────────────────────────────────
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    async def get_campaigns(self) -> List[Dict]:
+        path = f"/act_{self.ad_account_id}/campaigns"
+        fields = "id,name,status,objective,daily_budget,lifetime_budget"
+        data = await self._get(path, {"fields": fields, "limit": 500})
+        return data.get("data", [])
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    async def get_adsets(self, campaign_id: str) -> List[Dict]:
+        path = f"/{campaign_id}/adsets"
+        fields = "id,name,status,daily_budget,targeting"
+        data = await self._get(path, {"fields": fields, "limit": 500})
+        return data.get("data", [])
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    async def get_ads(self, adset_id: str) -> List[Dict]:
+        path = f"/{adset_id}/ads"
+        fields = "id,name,status,creative{id,object_type}"
+        data = await self._get(path, {"fields": fields, "limit": 500})
+        return data.get("data", [])
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    async def get_ad_insights(self, ad_id: str, date_preset: str = "last_7d") -> Dict:
+        path = f"/{ad_id}/insights"
+        data = await self._get(path, {"fields": INSIGHT_FIELDS, "date_preset": date_preset})
+        items = data.get("data", [])
+        return items[0] if items else {}
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    async def get_campaign_insights(self, campaign_id: str, date_preset: str = "last_7d") -> Dict:
+        path = f"/{campaign_id}/insights"
+        data = await self._get(path, {"fields": INSIGHT_FIELDS, "date_preset": date_preset})
+        items = data.get("data", [])
+        return items[0] if items else {}
+
+    # ── Mutation helpers ───────────────────────────────────────────────────────
+
+    async def update_ad_status(self, ad_id: str, status: str) -> Dict:
+        resp = await self._http.post(
+            f"{BASE_URL}/{ad_id}",
+            params={"access_token": self.access_token},
+            json={"status": status},
+        )
+        return resp.json()
+
+    async def update_campaign_status(self, campaign_id: str, status: str) -> Dict:
+        resp = await self._http.post(
+            f"{BASE_URL}/{campaign_id}",
+            params={"access_token": self.access_token},
+            json={"status": status},
+        )
+        return resp.json()
+
+    async def update_campaign_budget(self, campaign_id: str, daily_budget: int) -> Dict:
+        resp = await self._http.post(
+            f"{BASE_URL}/{campaign_id}",
+            params={"access_token": self.access_token},
+            json={"daily_budget": daily_budget},
+        )
+        return resp.json()
+
+    async def duplicate_campaign(self, campaign_id: str) -> Dict:
+        resp = await self._http.post(
+            f"{BASE_URL}/{campaign_id}/copies",
+            params={"access_token": self.access_token},
+            json={"deep_copy": True, "status_option": "PAUSED"},
+        )
+        return resp.json()
+
+    async def close(self):
+        await self._http.aclose()

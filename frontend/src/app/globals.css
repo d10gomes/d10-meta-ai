@@ -1,0 +1,28 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-surface text-gray-100;
+  }
+}
+
+@layer components {
+  .card {
+    @apply bg-surface-card border border-surface-border rounded-xl p-5;
+  }
+  .btn-primary {
+    @apply bg-brand-500 hover:bg-brand-600 text-white font-semibold py-2 px-4 rounded-lg transition-colors;
+  }
+  .btn-ghost {
+    @apply text-gray-400 hover:text-white hover:bg-surface-border py-2 px-4 rounded-lg transition-colors;
+  }
+  .badge-critical { @apply bg-red-500/20 text-red-400 text-xs font-medium px-2 py-0.5 rounded-full; }
+  .badge-high { @apply bg-orange-500/20 text-orange-400 text-xs font-medium px-2 py-0.5 rounded-full; }
+  .badge-medium { @apply bg-yellow-500/20 text-yellow-400 text-xs font-medium px-2 py-0.5 rounded-full; }
+  .badge-low { @apply bg-green-500/20 text-green-400 text-xs font-medium px-2 py-0.5 rounded-full; }
+  .badge-winner { @apply bg-green-500/20 text-green-400 text-xs font-medium px-2 py-0.5 rounded-full; }
+  .badge-average { @apply bg-yellow-500/20 text-yellow-400 text-xs font-medium px-2 py-0.5 rounded-full; }
+  .badge-loser { @apply bg-red-500/20 text-red-400 text-xs font-medium px-2 py-0.5 rounded-full; }
+}
