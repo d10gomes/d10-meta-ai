@@ -184,7 +184,15 @@ class AgentAction(Base):
     entity_type = Column(String(50))
     entity_id = Column(String(100))
     payload = Column(JSON)
-    status = Column(Enum("pending", "executed", "failed", "skipped", name="action_status"), default="pending")
+    status = Column(
+        Enum("pending", "simulating", "approved", "rejected", "executed", "failed", "skipped",
+             name="action_status"),
+        default="pending",
+    )
+    simulation_result = Column(JSON)
+    requires_approval = Column(Boolean, default=False)
+    approved_by = Column(UUID(as_uuid=False), ForeignKey("users.id"), nullable=True)
+    approved_at = Column(DateTime)
     executed_at = Column(DateTime)
     error = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -304,3 +312,96 @@ class KnowledgeEntry(Base):
     expires_at = Column(DateTime)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+# ---------------------------------------------------------------------------
+# Audit Log — imutável, toda ação de mutação registrada aqui
+# ---------------------------------------------------------------------------
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+
+    id = Column(UUID(as_uuid=False), primary_key=True, default=_uuid)
+    tenant_id = Column(UUID(as_uuid=False), ForeignKey("tenants.id"), nullable=False)
+    agent_name = Column(String(80), nullable=False, index=True)
+    action_type = Column(String(100), nullable=False, index=True)
+    entity_type = Column(String(50), nullable=False)
+    entity_id = Column(String(200))
+    before_state = Column(JSON)
+    after_state = Column(JSON)
+    payload = Column(JSON)
+    cost_usd = Column(Float, default=0.0)
+    duration_ms = Column(Integer)
+    status = Column(String(20), default="success")
+    error = Column(Text)
+    executed_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+# ---------------------------------------------------------------------------
+# Simulation — resultado de simulação de uma ação crítica
+# ---------------------------------------------------------------------------
+
+class Simulation(Base):
+    __tablename__ = "simulations"
+
+    id = Column(UUID(as_uuid=False), primary_key=True, default=_uuid)
+    action_id = Column(UUID(as_uuid=False), ForeignKey("agent_actions.id"), nullable=False)
+    tenant_id = Column(UUID(as_uuid=False), ForeignKey("tenants.id"), nullable=False)
+    risk_level = Column(Enum("low", "medium", "high", "critical", name="risk_level"), default="medium")
+    can_proceed = Column(Boolean, default=True)
+    impact_estimate = Column(JSON)
+    risk_factors = Column(JSON)
+    rollback_plan = Column(JSON)
+    recommendation = Column(Text)
+    confidence = Column(Float, default=0.7)
+    requires_approval = Column(Boolean, default=False)
+    approved_by = Column(UUID(as_uuid=False), ForeignKey("users.id"), nullable=True)
+    approved_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+# ---------------------------------------------------------------------------
+# Maestro Orchestration — log de cada orquestração executada
+# ---------------------------------------------------------------------------
+
+class Orchestration(Base):
+    __tablename__ = "orchestrations"
+
+    id = Column(UUID(as_uuid=False), primary_key=True, default=_uuid)
+    tenant_id = Column(UUID(as_uuid=False), ForeignKey("tenants.id"), nullable=False)
+    objective = Column(Text, nullable=False)
+    plan = Column(JSON)
+    results = Column(JSON)
+    status = Column(String(30), default="running")
+    tasks_total = Column(Integer, default=0)
+    tasks_ok = Column(Integer, default=0)
+    tasks_failed = Column(Integer, default=0)
+    duration_seconds = Column(Float)
+    report = Column(Text)
+    started_at = Column(DateTime, default=datetime.utcnow)
+    finished_at = Column(DateTime)
+
+
+# ---------------------------------------------------------------------------
+# Lesson — lições estruturadas extraídas pelo Learning Agent
+# ---------------------------------------------------------------------------
+
+class Lesson(Base):
+    __tablename__ = "lessons"
+
+    id = Column(UUID(as_uuid=False), primary_key=True, default=_uuid)
+    tenant_id = Column(UUID(as_uuid=False), ForeignKey("tenants.id"), nullable=True)
+    lesson_type = Column(
+        Enum("what_works", "what_fails", "audience_insight", "creative_insight", "budget_insight",
+             name="lesson_type"),
+        nullable=False,
+        index=True,
+    )
+    title = Column(String(300), nullable=False)
+    lesson = Column(Text, nullable=False)
+    evidence = Column(JSON)
+    context = Column(JSON)
+    confidence = Column(Float, default=0.7)
+    applies_to = Column(JSON)
+    applied_count = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)

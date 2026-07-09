@@ -204,6 +204,15 @@ async def job_whatsapp():
         logger.error("whatsapp.scheduled_error", error=str(exc))
 
 
+async def job_learning():
+    logger.info("learning.scheduled_start")
+    try:
+        from app.agents.learning.service import LearningService
+        await _run_per_tenant(LearningService, "learning")
+    except Exception as exc:
+        logger.error("learning.scheduled_error", error=str(exc))
+
+
 # ---------------------------------------------------------------------------
 # Register all jobs
 # ---------------------------------------------------------------------------
@@ -285,6 +294,16 @@ def setup_scheduler():
         CronTrigger(hour=8, minute=0),
         id="whatsapp",
         name="WhatsApp — Relatório Diário",
+        replace_existing=True,
+        misfire_grace_time=600,
+    )
+
+    # 9. Learning — extrai lições às 23h00 (depois dos dados do dia)
+    scheduler.add_job(
+        job_learning,
+        CronTrigger(hour=23, minute=0),
+        id="learning",
+        name="Learning — Extrair Lições do Dia",
         replace_existing=True,
         misfire_grace_time=600,
     )

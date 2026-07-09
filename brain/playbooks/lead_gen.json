@@ -1,0 +1,39 @@
+{
+  "_meta": "Playbook para campanhas de geração de leads no Meta Ads",
+  "objective": "lead_gen",
+  "recommended_structure": {
+    "campaign_level": {
+      "objective": "LEAD_GENERATION",
+      "bid_strategy": "LOWEST_COST_WITHOUT_CAP",
+      "budget_type": "daily"
+    },
+    "adset_level": {
+      "optimization_goal": "LEAD",
+      "billing_event": "IMPRESSIONS",
+      "audience_split": {
+        "cold": {"allocation_pct": 60, "types": ["broad", "interest_based", "lookalike_1pct"]},
+        "warm": {"allocation_pct": 30, "types": ["website_visitors_30d", "video_viewers"]},
+        "hot":  {"allocation_pct": 10, "types": ["lead_list_LAL", "page_engagers"]}
+      }
+    },
+    "ad_level": {
+      "formats": ["single_image", "carousel", "video"],
+      "recommended_copies_per_format": 2,
+      "ab_test": true
+    }
+  },
+  "kpi_targets": {
+    "cpl_max_brl": null,
+    "ctr_min_pct": 1.0,
+    "frequency_max": 3.5
+  },
+  "compliance_notes": [
+    "Evitar claims absolutos (melhor, único, garantido)",
+    "Incluir disclaimer de privacidade no formulário de lead",
+    "Verificar políticas de nicho (saúde, finanças, política exigem aprovação especial)"
+  ],
+  "optimization_schedule": {
+    "first_evaluation_days": 3,
+    "budget_scale_interval_days": 7
+  }
+}

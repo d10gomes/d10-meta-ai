@@ -1,0 +1,38 @@
+{
+  "_meta": "Regras globais do sistema — valem para todos os tenants. Podem ser sobrescritas por regras do tenant.",
+  "budget": {
+    "max_increase_pct_per_action": 30,
+    "max_decrease_pct_per_action": 30,
+    "min_daily_budget_brl": 20,
+    "pause_if_roas_below": 0.5,
+    "pause_if_zero_conversions_days": 3,
+    "scale_if_roas_above": 3.0,
+    "scale_if_roas_above_days": 3
+  },
+  "creative": {
+    "pause_if_frequency_above": 4.0,
+    "alert_if_frequency_above": 3.0,
+    "alert_if_ctr_below_pct": 0.8,
+    "fatigue_detection_window_days": 7
+  },
+  "decisions": {
+    "require_simulation_for": [
+      "PAUSAR_CAMPANHA",
+      "REDUZIR_BUDGET",
+      "AUMENTAR_BUDGET",
+      "PAUSAR_ADSET"
+    ],
+    "require_approval_above_budget_change_pct": 20,
+    "max_actions_per_cycle": 10,
+    "min_confidence_to_act": 0.7
+  },
+  "alerts": {
+    "channels": ["whatsapp", "dashboard"],
+    "critical_immediate": true,
+    "daily_summary_hour": 8
+  },
+  "learning": {
+    "extract_after_days": 7,
+    "min_spend_to_learn_brl": 100
+  }
+}
