@@ -1,6 +1,6 @@
 "use client";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useState, useEffect } from "react";
+import { useState, useEffect, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import { api } from "@/lib/api";
 import type { MetaAccount } from "@/types";
@@ -25,7 +25,7 @@ interface ValidateResponse {
 
 type ConnectMode = "idle" | "oauth" | "manual";
 
-export default function AccountsPage() {
+function AccountsPageInner() {
   const qc = useQueryClient();
   const searchParams = useSearchParams();
   const [mode, setMode] = useState<ConnectMode>("idle");
@@ -372,5 +372,13 @@ export default function AccountsPage() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function AccountsPage() {
+  return (
+    <Suspense fallback={<div className="p-8 text-gray-500">Carregando...</div>}>
+      <AccountsPageInner />
+    </Suspense>
   );
 }
