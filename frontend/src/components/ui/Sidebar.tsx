@@ -3,7 +3,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   LayoutDashboard, Megaphone, Stethoscope, Zap, Palette,
-  BarChart3, Settings, LogOut, Bot, Brain,
+  BarChart3, Settings, LogOut, Bot, Brain, Activity,
 } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
 import { clsx } from "clsx";
@@ -11,6 +11,7 @@ import { clsx } from "clsx";
 const NAV = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
   { href: "/maestro", label: "Maestro", icon: Brain, highlight: true },
+  { href: "/monitor", label: "Monitor 24h", icon: Activity, highlight: true },
   { href: "/accounts", label: "Contas Meta", icon: Megaphone },
   { href: "/campaigns", label: "Campanhas", icon: Zap },
   { href: "/agents", label: "Agentes", icon: Bot },

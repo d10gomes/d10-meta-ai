@@ -137,7 +137,25 @@ Escreva o relatório diretamente, pronto para envio.""",
         return {"sent": sent_count, "report_preview": report_text[:300]}
 
     async def _send_whatsapp(self, phone: str, message: str) -> None:
-        """Send via Evolution API. Falls back gracefully if not configured."""
+        """Envia via Telegram (gratuito) ou Evolution API (WhatsApp) como fallback."""
+        import os
+
+        # Telegram — gratuito, prioritário
+        tg_token = os.getenv("TELEGRAM_BOT_TOKEN", "8977629545:AAFY3QF9LOSdbFAI5dNhwzX8hYvaveQGYKw")
+        if tg_token and phone:
+            try:
+                async with httpx.AsyncClient(timeout=15) as client:
+                    resp = await client.post(
+                        f"https://api.telegram.org/bot{tg_token}/sendMessage",
+                        data={"chat_id": phone, "text": message},
+                    )
+                    if resp.status_code == 200:
+                        logger.info("whatsapp.telegram_sent", chat_id=phone[-4:])
+                        return
+            except Exception as exc:
+                logger.warning("whatsapp.telegram_failed", error=str(exc))
+
+        # Fallback: Evolution API (WhatsApp)
         evolution_url = getattr(settings, "EVOLUTION_API_URL", None)
         evolution_key = getattr(settings, "EVOLUTION_API_KEY", None)
         evolution_instance = getattr(settings, "EVOLUTION_INSTANCE", "d10")

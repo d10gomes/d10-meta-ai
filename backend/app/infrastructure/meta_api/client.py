@@ -191,5 +191,43 @@ class MetaAdsClient:
         )
         return resp.json()
 
+    # ── Creative Library ───────────────────────────────────────────────────────
+
+    async def upload_image(self, content: bytes, filename: str) -> Dict:
+        """Upload image bytes to Meta Ad Images. Returns {'hash': ..., 'url': ...}."""
+        import base64
+        b64 = base64.b64encode(content).decode()
+        data = await self._post(
+            f"/act_{self.ad_account_id}/adimages",
+            params={"bytes": b64, "name": filename, "access_token": self.access_token},
+        )
+        images = data.get("images", {})
+        # Response keys vary by filename; grab first result
+        first = next(iter(images.values()), {}) if images else {}
+        return {"hash": first.get("hash"), "url": first.get("url")}
+
+    async def upload_video(self, content: bytes, filename: str) -> Dict:
+        """Upload video bytes to Meta Ad Videos. Returns {'video_id': ...}."""
+        import tempfile, os
+        # Meta requires multipart form upload for videos
+        with tempfile.NamedTemporaryFile(suffix=os.path.splitext(filename)[-1], delete=False) as f:
+            f.write(content)
+            tmp_path = f.name
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                with open(tmp_path, "rb") as fh:
+                    resp = await client.post(
+                        f"https://graph-video.facebook.com/{settings.META_API_VERSION}/act_{self.ad_account_id}/advideos",
+                        params={"access_token": self.access_token},
+                        files={"source": (filename, fh, "video/mp4")},
+                        data={"title": filename},
+                    )
+                data = resp.json()
+                if "error" in data:
+                    raise MetaAPIError(data["error"].get("message", "Video upload error"))
+                return {"video_id": data.get("id")}
+        finally:
+            os.unlink(tmp_path)
+
     async def close(self):
         await self._http.aclose()

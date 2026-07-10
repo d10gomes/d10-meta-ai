@@ -204,6 +204,20 @@ async def job_whatsapp():
         logger.error("whatsapp.scheduled_error", error=str(exc))
 
 
+async def job_performance_monitor():
+    logger.info("performance_monitor.scheduled_start")
+    try:
+        from app.agents.performance_monitor.service import PerformanceMonitor
+        from app.db.session import AsyncSessionLocal
+        async with AsyncSessionLocal() as session:
+            monitor = PerformanceMonitor(session)
+            tenant_ids = await _get_tenant_ids()
+            for tid in tenant_ids:
+                await monitor.run(tid)
+    except Exception as exc:
+        logger.error("performance_monitor.scheduled_error", error=str(exc))
+
+
 async def job_learning():
     logger.info("learning.scheduled_start")
     try:
@@ -306,6 +320,16 @@ def setup_scheduler():
         name="Learning — Extrair Lições do Dia",
         replace_existing=True,
         misfire_grace_time=600,
+    )
+
+    # 10. Performance Monitor — análise contínua 24h (00h, 06h, 12h, 18h + 50min)
+    scheduler.add_job(
+        job_performance_monitor,
+        CronTrigger(hour="0,6,12,18", minute=50),
+        id="performance_monitor",
+        name="Performance Monitor — Análise 24h Blaze/Circo/MMABET",
+        replace_existing=True,
+        misfire_grace_time=300,
     )
 
     logger.info("scheduler.configured", jobs=len(scheduler.get_jobs()))

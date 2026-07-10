@@ -405,3 +405,56 @@ class Lesson(Base):
     applies_to = Column(JSON)
     applied_count = Column(Integer, default=0)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+# ---------------------------------------------------------------------------
+# Creative Library (media assets)
+# ---------------------------------------------------------------------------
+
+class MediaAsset(Base):
+    __tablename__ = "media_assets"
+
+    id = Column(UUID(as_uuid=False), primary_key=True, default=_uuid)
+    tenant_id = Column(UUID(as_uuid=False), ForeignKey("tenants.id"), nullable=False)
+    meta_account_id = Column(UUID(as_uuid=False), ForeignKey("meta_accounts.id"), nullable=True)
+
+    # File info
+    name = Column(String(500), nullable=False)
+    original_name = Column(String(500), nullable=False)
+    file_type = Column(String(20), nullable=False)      # image | video | gif
+    format = Column(String(30), nullable=False, default="unknown")  # feed|story|reels|carousel|unknown
+    mime_type = Column(String(100), nullable=False)
+    file_size_bytes = Column(Integer, nullable=False)
+    width_px = Column(Integer)
+    height_px = Column(Integer)
+    duration_secs = Column(Float)
+
+    # Storage
+    storage_bucket = Column(String(100), nullable=False, default="creatives")
+    storage_path = Column(String(1000), nullable=False)
+    public_url = Column(Text)
+
+    # Meta sync
+    meta_image_hash = Column(String(200))
+    meta_video_id = Column(String(100))
+    meta_status = Column(String(50))
+    meta_synced_at = Column(DateTime)
+
+    # Organisation
+    offer_id = Column(String(200))
+    tags = Column(JSON, default=list)
+    notes = Column(Text)
+
+    # Performance (updated by Creative Agent)
+    avg_ctr = Column(Float)
+    avg_roas = Column(Float)
+    avg_cpa = Column(Float)
+    avg_frequency = Column(Float)
+    times_used = Column(Integer, default=0)
+    last_used_at = Column(DateTime)
+    performance_score = Column(Float)
+
+    status = Column(String(30), nullable=False, default="uploading")
+    uploaded_by = Column(UUID(as_uuid=False), ForeignKey("users.id"))
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
