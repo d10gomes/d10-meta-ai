@@ -29,7 +29,8 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("db.connection_warning", error=str(exc))
     try:
-        await redis_client.ping()
+        async with asyncio.timeout(3):
+            await redis_client.ping()
         logger.info("redis.connected")
     except Exception as exc:
         logger.warning("redis.connection_warning", error=str(exc))
