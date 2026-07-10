@@ -8,8 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import require_role
 from app.core.scheduler import (
-    scheduler, job_scanner, job_doctor_and_decision, job_executor,
-    job_whatsapp_daily, job_analyst, job_budget_optimizer, job_campaign_manager,
+    scheduler, job_scanner, job_doctor, job_decision, job_executor,
+    job_whatsapp, job_analyst, job_budget_optimizer,
 )
 from app.db.models import User, AgentRun, AgentInsight
 from app.db.session import get_db
@@ -179,7 +179,8 @@ async def trigger_doctor(
     background_tasks: BackgroundTasks,
     current_user: User = Depends(require_role("admin", "manager")),
 ):
-    background_tasks.add_task(job_doctor_and_decision)
+    background_tasks.add_task(job_doctor)
+    background_tasks.add_task(job_decision)
     return {"status": "doctor started"}
 
 
@@ -198,7 +199,7 @@ async def send_whatsapp_report(
     report_type: str = "daily",
     current_user: User = Depends(require_role("admin")),
 ):
-    background_tasks.add_task(job_whatsapp_daily)
+    background_tasks.add_task(job_whatsapp)
     return {"status": "report queued"}
 
 
@@ -219,14 +220,6 @@ async def trigger_budget_optimizer(
     background_tasks.add_task(job_budget_optimizer)
     return {"status": "budget optimizer started"}
 
-
-@router.post("/manage-campaigns")
-async def trigger_campaign_manager(
-    background_tasks: BackgroundTasks,
-    current_user: User = Depends(require_role("admin", "manager")),
-):
-    background_tasks.add_task(job_campaign_manager)
-    return {"status": "campaign manager started"}
 
 
 @router.get("/insights")
