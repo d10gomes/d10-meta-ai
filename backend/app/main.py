@@ -22,8 +22,9 @@ from app.infrastructure.cache.redis_client import redis_client
 async def lifespan(app: FastAPI):
     configure_logging()
     try:
-        async with engine.connect() as conn:
-            await conn.execute(sqlalchemy.text("SELECT 1"))
+        async with asyncio.timeout(5):
+            async with engine.connect() as conn:
+                await conn.execute(sqlalchemy.text("SELECT 1"))
         logger.info("db.connected")
     except Exception as exc:
         logger.warning("db.connection_warning", error=str(exc))
