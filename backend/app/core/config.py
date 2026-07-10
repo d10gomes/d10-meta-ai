@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     # Meta API
     META_APP_ID: str = ""
     META_APP_SECRET: str = ""
-    META_API_VERSION: str = "v19.0"
+    META_API_VERSION: str = "v21.0"
     META_CONFIG_ID: str = ""  # Facebook Login for Business config_id
 
     # WhatsApp

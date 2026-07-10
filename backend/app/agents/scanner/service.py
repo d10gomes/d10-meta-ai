@@ -127,23 +127,26 @@ class ScannerService(AgentBase):
         campaigns = await client.get_campaigns()
         campaign_summaries = []
         for camp_data in campaigns:
-            summary["campaigns_found"] += 1
-            campaign = await self._campaign_repo.upsert_campaign({
-                "meta_account_id": str(account.id),
-                "meta_campaign_id": camp_data["id"],
-                "name": camp_data.get("name"),
-                "status": camp_data.get("status"),
-                "objective": camp_data.get("objective"),
-                "daily_budget": float(camp_data["daily_budget"]) if camp_data.get("daily_budget") else None,
-                "lifetime_budget": float(camp_data["lifetime_budget"]) if camp_data.get("lifetime_budget") else None,
-            })
-            adset_data = await self._sync_adsets(client, campaign, summary)
-            campaign_summaries.append({
-                "id": camp_data["id"],
-                "name": camp_data.get("name"),
-                "status": camp_data.get("status"),
-                "adsets": adset_data,
-            })
+            try:
+                summary["campaigns_found"] += 1
+                campaign = await self._campaign_repo.upsert_campaign({
+                    "meta_account_id": str(account.id),
+                    "meta_campaign_id": camp_data["id"],
+                    "name": camp_data.get("name"),
+                    "status": camp_data.get("status"),
+                    "objective": camp_data.get("objective"),
+                    "daily_budget": float(camp_data["daily_budget"]) if camp_data.get("daily_budget") else None,
+                    "lifetime_budget": float(camp_data["lifetime_budget"]) if camp_data.get("lifetime_budget") else None,
+                })
+                adset_data = await self._sync_adsets(client, campaign, summary)
+                campaign_summaries.append({
+                    "id": camp_data["id"],
+                    "name": camp_data.get("name"),
+                    "status": camp_data.get("status"),
+                    "adsets": adset_data,
+                })
+            except Exception as exc:
+                logger.warning("scanner.campaign_skipped", campaign_id=camp_data.get("id"), error=str(exc))
         return campaign_summaries
 
     async def _sync_adsets(self, client, campaign, summary: dict) -> list[dict]:
