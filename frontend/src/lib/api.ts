@@ -12,6 +12,13 @@ api.interceptors.request.use((config) => {
     const token = localStorage.getItem("access_token");
     if (token) config.headers.Authorization = `Bearer ${token}`;
   }
+  // Add trailing slash to avoid FastAPI 307 redirect which strips Authorization header
+  if (config.url) {
+    const [path, qs] = config.url.split("?");
+    if (!path.endsWith("/")) {
+      config.url = path + "/" + (qs ? "?" + qs : "");
+    }
+  }
   return config;
 });
 
