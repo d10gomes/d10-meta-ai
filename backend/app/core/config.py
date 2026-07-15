@@ -17,7 +17,12 @@ class Settings(BaseSettings):
     APP_ENV: str = "development"
     APP_SECRET_KEY: str = "change-me"
     APP_DEBUG: bool = True
-    ALLOWED_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost"]
+    ALLOWED_ORIGINS: List[str] = [
+        "http://localhost:3000",
+        "http://localhost",
+        "https://d10-meta-ai-frontend.vercel.app",
+        "https://d10-meta-ai-frontend-perfile.vercel.app",
+    ]
 
     # Database
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/d10"
