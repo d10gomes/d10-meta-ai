@@ -10,11 +10,13 @@ from datetime import datetime, timedelta
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.base import AgentBase
 from app.core.logging import logger
+
+from app.core.config import settings
 
 BLAZE_ACCOUNT_ID = "1191928981271362"
 META_BASE = "https://graph.facebook.com/v21.0"
-TG_TOKEN = "8977629545:AAFY3QF9LOSdbFAI5dNhwzX8hYvaveQGYKw"
 
 # Agrupa conjuntos por marca
 BRAND_MAP = {
@@ -71,13 +73,16 @@ def _status_icon(severity: str) -> str:
     return {"ok": "✅", "warning": "⚠️", "critical": "🔴", "opportunity": "🚀"}.get(severity, "•")
 
 
-class PerformanceMonitor:
+class PerformanceMonitor(AgentBase):
+    name = "performance_monitor"
 
     def __init__(self, session: AsyncSession):
+        super().__init__(session)
         self.session = session
         self._anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
 
     async def run(self, tenant_id: str) -> dict:
+        self._tenant_id = tenant_id
         logger.info("performance_monitor.start", tenant_id=tenant_id)
 
         token = await self._get_blaze_token()
@@ -91,10 +96,16 @@ class PerformanceMonitor:
         brands = self._group_by_brand(metrics)
         analysis = self._analyze(brands)
 
-        # Sempre manda mensagem completa (não só quando crítico)
         message = self._build_message(brands, analysis)
         await self._send_telegram(message)
         await self._save_to_brain(analysis, message, tenant_id)
+
+        # Publica na Knowledge Base para Analyst/Doctor/Decision lerem
+        await self._publish_to_kb(brands, analysis, tenant_id)
+
+        # Alerta proativo imediato se crítico
+        if analysis["critical"]:
+            await self._send_critical_alert(analysis, tenant_id)
 
         logger.info("performance_monitor.done",
                     brands=len(brands),
@@ -109,6 +120,82 @@ class PerformanceMonitor:
             "critical": analysis["critical"],
             "report": message,
         }
+
+    async def _publish_to_kb(self, brands: dict, analysis: dict, tenant_id: str) -> None:
+        """Publica estado das campanhas na Knowledge Base para os outros agentes."""
+        try:
+            brand_summary = []
+            for b in brands.values():
+                p7 = b["last7d"]
+                brand_summary.append({
+                    "brand": b["name"],
+                    "spend_7d": p7["spend"],
+                    "roas": p7["roas"],
+                    "cpl": p7["cpl"],
+                    "purchases": p7["purchases"],
+                    "signups": p7["signups"],
+                })
+
+            severity = "critical" if analysis["critical"] else (
+                "high" if any(a["severity"] == "warning" for a in analysis["alerts"]) else "low"
+            )
+
+            await self.publish_knowledge(
+                topic="monitor_report",
+                entry_type="raw_data",
+                content={
+                    "brands": brand_summary,
+                    "alerts": analysis["alerts"],
+                    "opportunities": analysis["opportunities"],
+                    "critical": analysis["critical"],
+                    "generated_at": datetime.utcnow().isoformat(),
+                },
+                summary=(
+                    f"Monitor Blaze: {len(brands)} marcas analisadas. "
+                    f"{len(analysis['alerts'])} alertas, {len(analysis['opportunities'])} oportunidades. "
+                    f"{'CRÍTICO' if analysis['critical'] else 'Dentro do esperado'}."
+                ),
+                confidence=1.0,
+                ttl_hours=7,
+            )
+        except Exception as e:
+            logger.warning("performance_monitor.kb_publish_failed", error=str(e))
+
+    async def _send_critical_alert(self, analysis: dict, tenant_id: str) -> None:
+        """Envia alerta imediato no Telegram quando há situação crítica."""
+        from sqlalchemy import text
+        try:
+            result = await self.session.execute(
+                text("SELECT telegram_chat_id FROM tenants WHERE id = :tid LIMIT 1"),
+                {"tid": tenant_id},
+            )
+            row = result.fetchone()
+            chat_id = row[0] if row else None
+            if not chat_id:
+                return
+
+            tg_token = settings.TELEGRAM_BOT_TOKEN
+            if not tg_token:
+                return
+
+            critical_msgs = [
+                f"🔴 {a['brand']}: {a['msg']}"
+                for a in analysis["alerts"] if a["severity"] == "critical"
+            ]
+            text_msg = (
+                "🚨 *ALERTA CRÍTICO — D10 Meta AI*\n\n"
+                + "\n".join(critical_msgs)
+                + "\n\n⚡ Acesse o app para tomar uma ação agora."
+            )
+
+            async with httpx.AsyncClient(timeout=10) as client:
+                await client.post(
+                    f"https://api.telegram.org/bot{tg_token}/sendMessage",
+                    data={"chat_id": chat_id, "text": text_msg, "parse_mode": "Markdown"},
+                )
+            logger.info("performance_monitor.critical_alert_sent")
+        except Exception as e:
+            logger.warning("performance_monitor.critical_alert_failed", error=str(e))
 
     async def _get_blaze_token(self) -> str | None:
         from sqlalchemy import text
@@ -351,12 +438,16 @@ class PerformanceMonitor:
             logger.warning("performance_monitor.no_chat_id")
             return
 
-        # Telegram limita mensagens a 4096 chars — divide se necessário
+        tg_token = settings.TELEGRAM_BOT_TOKEN
+        if not tg_token:
+            logger.warning("performance_monitor.no_telegram_token")
+            return
+
         chunks = [message[i:i+4000] for i in range(0, len(message), 4000)]
         async with httpx.AsyncClient(timeout=15) as client:
             for chunk in chunks:
                 await client.post(
-                    f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                    f"https://api.telegram.org/bot{tg_token}/sendMessage",
                     data={"chat_id": chat_id, "text": chunk},
                 )
         logger.info("performance_monitor.telegram_sent", chat_id=chat_id)

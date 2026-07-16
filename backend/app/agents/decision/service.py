@@ -66,6 +66,19 @@ Responda em JSON válido com a chave "decisions" contendo lista de decisões."""
 
         learning_context = self._build_learning_context(past_decisions, past_outcomes)
 
+        # 2b. Consultar lições do Learning Agent no Brain
+        from app.core import brain
+        lessons_work = brain.get_lessons("what_works", limit=5)
+        lessons_fail = brain.get_lessons("what_fails", limit=5)
+        lessons_text = ""
+        if lessons_work or lessons_fail:
+            lines = ["LIÇÕES APRENDIDAS (Learning Agent):"]
+            for l in lessons_work:
+                lines.append(f"  ✅ {l.get('title')}: {l.get('lesson', '')[:150]}")
+            for l in lessons_fail:
+                lines.append(f"  ❌ {l.get('title')}: {l.get('lesson', '')[:150]}")
+            lessons_text = "\n".join(lines)
+
         # 3. Preparar contexto para Claude
         insights_text = "\n".join([
             f"[{e['source_agent']}] {e['summary']}" for e in analyst_insights
@@ -88,7 +101,9 @@ ALERTAS ATIVOS:
 HISTÓRICO DE DECISÕES ANTERIORES E RESULTADOS:
 {learning_context}
 
-Tome decisões ponderadas considerando o histórico. Responda em JSON.""",
+{lessons_text}
+
+Tome decisões ponderadas considerando o histórico e as lições aprendidas. Responda em JSON.""",
             max_tokens=1500,
         )
 

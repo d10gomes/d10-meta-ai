@@ -203,6 +203,13 @@ Crie o plano de execução completo em JSON.""",
 
         return all_results
 
+    # Ações que OBRIGATORIAMENTE passam pela Simulation antes de executar
+    _CRITICAL_ACTIONS = {
+        "PAUSAR_CAMPANHA", "PAUSAR_ADSET", "PAUSAR_AD",
+        "REDUZIR_BUDGET", "AUMENTAR_BUDGET", "AJUSTAR_BUDGET",
+        "SCALE_BUDGET_UP", "SCALE_BUDGET_DOWN",
+    }
+
     async def _run_task(self, task: dict, tenant_id: str, prev_results: dict) -> dict:
         """Instantiate the right agent and call the right method."""
         agent_name = task.get("agent", "")
@@ -214,6 +221,18 @@ Crie o plano de execução completo em JSON.""",
             dep_result = prev_results.get(dep_id, {})
             if dep_result.get("ok"):
                 task_input[f"_dep_{dep_id}"] = dep_result.get("data")
+
+        # Gate: ações críticas passam pela Simulation primeiro
+        action_type = task_input.get("action_type", "").upper()
+        if action_type in self._CRITICAL_ACTIONS:
+            sim_result = await self._run_simulation_gate(task, task_input, tenant_id)
+            if sim_result.get("blocked"):
+                return {
+                    "ok": False,
+                    "blocked_by_simulation": True,
+                    "risk_level": sim_result.get("risk_level"),
+                    "reason": sim_result.get("recommendation", "Simulação bloqueou a ação por alto risco."),
+                }
 
         svc = self._load_agent(agent_name, tenant_id)
         if svc is None:
@@ -229,6 +248,40 @@ Crie o plano de execução completo em JSON.""",
         except Exception as exc:
             logger.error("maestro.task_error", agent=agent_name, action=action, error=str(exc))
             return {"ok": False, "agent": agent_name, "error": str(exc)}
+
+    async def _run_simulation_gate(self, task: dict, task_input: dict, tenant_id: str) -> dict:
+        """Roda simulação e bloqueia se risco for crítico."""
+        try:
+            sim_svc = self._load_agent("simulation", tenant_id)
+            if not sim_svc:
+                return {"blocked": False}
+
+            sim_action = {
+                "action_type": task_input.get("action_type", ""),
+                "entity_type": task_input.get("entity_type", "campaign"),
+                "entity_id": task_input.get("entity_id", ""),
+                "params": task_input,
+            }
+            result = await sim_svc.simulate(sim_action, tenant_id)
+
+            risk = result.get("risk_level", "low")
+            can_proceed = result.get("can_proceed", True)
+
+            logger.info(
+                "maestro.simulation_gate",
+                action=task_input.get("action_type"),
+                risk=risk,
+                can_proceed=can_proceed,
+            )
+
+            # Bloqueia somente se risco crítico OU simulação disse não prosseguir
+            if not can_proceed or risk == "critical":
+                return {"blocked": True, "risk_level": risk, **result}
+
+            return {"blocked": False, "risk_level": risk}
+        except Exception as e:
+            logger.warning("maestro.simulation_gate_failed", error=str(e))
+            return {"blocked": False}
 
     def _load_agent(self, agent_name: str, tenant_id: str):
         """Dynamic agent instantiation — avoids circular imports."""

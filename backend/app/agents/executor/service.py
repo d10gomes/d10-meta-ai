@@ -4,6 +4,7 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.base import AgentBase
 from app.core.logging import logger
 from app.db.models import AgentAction, Ad, Campaign
 from app.domain.entities.action import ActionType
@@ -13,12 +14,16 @@ from app.infrastructure.meta_api.client import MetaAdsClient
 from app.infrastructure.repositories.meta_account_repository import MetaAccountRepository
 
 
-class ExecutorService:
+class ExecutorService(AgentBase):
+    name = "executor"
+
     def __init__(self, session: AsyncSession):
+        super().__init__(session)
         self._session = session
         self._account_repo = MetaAccountRepository(session)
 
     async def execute_pending(self, tenant_id: str):
+        self._tenant_id = tenant_id
         result = await self._session.execute(
             select(AgentAction).where(
                 AgentAction.tenant_id == tenant_id,
@@ -37,12 +42,18 @@ class ExecutorService:
         if not action:
             return
 
+        self._tenant_id = str(action.tenant_id)
+
         try:
             client = await self._get_client_for_entity(action)
             await self._dispatch(action, client)
             action.status = "executed"
             action.executed_at = datetime.utcnow()
             await self._session.flush()
+
+            # Publica resultado na KB para o Learning Agent aprender
+            await self._publish_outcome(action, success=True)
+
             await publish(DomainEvent(
                 event_type=EventTypes.ACTION_EXECUTED,
                 tenant_id=str(action.tenant_id),
@@ -53,12 +64,40 @@ class ExecutorService:
             action.status = "failed"
             action.error = str(exc)
             await self._session.flush()
+
+            # Publica falha na KB também — o Learning aprende com erros
+            await self._publish_outcome(action, success=False, error=str(exc))
+
             await publish(DomainEvent(
                 event_type=EventTypes.ACTION_FAILED,
                 tenant_id=str(action.tenant_id),
                 payload={"action_id": action_id, "error": str(exc)},
             ))
             logger.error("executor.failed", action_id=action_id, error=str(exc))
+
+    async def _publish_outcome(self, action: AgentAction, success: bool, error: str = "") -> None:
+        """Publica resultado da execução na Knowledge Base."""
+        try:
+            status_str = "executada com sucesso" if success else f"falhou: {error}"
+            await self.publish_knowledge(
+                topic="action_outcome",
+                entry_type="outcome",
+                content={
+                    "action_id": str(action.id),
+                    "action_type": action.action_type,
+                    "entity_type": action.entity_type,
+                    "entity_id": action.entity_id,
+                    "success": success,
+                    "error": error,
+                    "executed_at": datetime.utcnow().isoformat(),
+                    "params": action.params if hasattr(action, "params") else {},
+                },
+                summary=f"Ação {action.action_type} sobre {action.entity_type} {status_str}",
+                confidence=1.0,
+                ttl_hours=72,
+            )
+        except Exception as e:
+            logger.warning("executor.kb_publish_failed", error=str(e))
 
     async def _dispatch(self, action: AgentAction, client: MetaAdsClient):
         a = action.action_type
