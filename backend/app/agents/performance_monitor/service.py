@@ -98,7 +98,7 @@ class PerformanceMonitor(AgentBase):
 
         message = self._build_message(brands, analysis)
         await self._send_telegram(message)
-        await self._save_to_brain(analysis, message, tenant_id)
+        await self._save_to_brain(analysis, message, tenant_id, brands)
 
         # Publica na Knowledge Base para Analyst/Doctor/Decision lerem
         await self._publish_to_kb(brands, analysis, tenant_id)
@@ -112,6 +112,8 @@ class PerformanceMonitor(AgentBase):
                     alerts=len(analysis["alerts"]),
                     critical=analysis["critical"])
 
+        total_spend_7d = round(sum(b["last7d"]["spend"] for b in brands.values()), 2)
+
         return {
             "status": "ok",
             "brands": len(brands),
@@ -119,6 +121,10 @@ class PerformanceMonitor(AgentBase):
             "opportunities": len(analysis["opportunities"]),
             "critical": analysis["critical"],
             "report": message,
+            "alerts_data": analysis["alerts"],
+            "opportunities_data": analysis["opportunities"],
+            "total_spend_7d": total_spend_7d,
+            "generated_at": datetime.utcnow().isoformat(),
         }
 
     async def _publish_to_kb(self, brands: dict, analysis: dict, tenant_id: str) -> None:
@@ -430,7 +436,7 @@ class PerformanceMonitor(AgentBase):
         """Envia mensagem no Telegram."""
         from sqlalchemy import text
         result = await self.session.execute(
-            text("SELECT whatsapp_number FROM tenants LIMIT 1")
+            text("SELECT telegram_chat_id FROM tenants LIMIT 1")
         )
         row = result.fetchone()
         chat_id = row[0] if row else None
@@ -452,9 +458,10 @@ class PerformanceMonitor(AgentBase):
                 )
         logger.info("performance_monitor.telegram_sent", chat_id=chat_id)
 
-    async def _save_to_brain(self, analysis: dict, report: str, tenant_id: str) -> None:
+    async def _save_to_brain(self, analysis: dict, report: str, tenant_id: str, brands: dict | None = None) -> None:
         try:
             from app.core import brain
+            spend_7d = sum(b["last7d"]["spend"] for b in brands.values()) if brands else 0
             brain.append(
                 "monitor/history",
                 {
@@ -462,6 +469,7 @@ class PerformanceMonitor(AgentBase):
                     "alerts": len(analysis["alerts"]),
                     "opportunities": len(analysis["opportunities"]),
                     "critical": analysis["critical"],
+                    "spend_7d": round(spend_7d, 2),
                     "report_snippet": report[:300],
                 },
                 tenant_id=tenant_id,

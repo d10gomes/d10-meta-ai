@@ -3,8 +3,8 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
-  AlertTriangle, TrendingUp, TrendingDown, Play, RefreshCw,
-  CheckCircle2, XCircle, Clock, Zap, BarChart2, Bell, BellOff,
+  AlertTriangle, TrendingUp, Play, RefreshCw,
+  CheckCircle2, XCircle, Clock, Zap, BarChart2, Bell,
   ChevronDown, ChevronUp, Activity,
 } from "lucide-react";
 import { clsx } from "clsx";
@@ -15,27 +15,13 @@ import { useApi } from "@/hooks/useApi";
 
 interface Alert {
   severity: "critical" | "warning";
-  adset: string;
-  metric: string;
-  value: number;
-  threshold: number;
-  action: string;
-  spend_7d: number;
+  brand: string;
+  msg: string;
 }
 
 interface Opportunity {
-  adset: string;
-  type: string;
-  metric: string;
-  value: number;
-  action: string;
-  spend_7d: number;
-}
-
-interface Winner {
-  adset: string;
-  roas?: number;
-  cpa?: number;
+  brand: string;
+  msg: string;
 }
 
 interface MonitorResult {
@@ -47,7 +33,6 @@ interface MonitorResult {
   report?: string;
   alerts_data?: Alert[];
   opportunities_data?: Opportunity[];
-  winners?: Winner[];
   total_spend_7d?: number;
   generated_at?: string;
 }
@@ -100,7 +85,7 @@ function AlertCard({ alert }: { alert: Alert }) {
             <AlertTriangle size={16} className="text-yellow-400 shrink-0 mt-0.5" />
           )}
           <span className="text-sm font-medium text-white truncate max-w-[260px]">
-            {alert.adset}
+            {alert.brand}
           </span>
         </div>
         <span
@@ -115,19 +100,7 @@ function AlertCard({ alert }: { alert: Alert }) {
         </span>
       </div>
 
-      <div className="flex items-center gap-4 text-xs text-gray-400 pl-6">
-        <span>
-          <span className="text-gray-500">{alert.metric}:</span>{" "}
-          <span className={isCritical ? "text-red-400 font-mono" : "text-yellow-400 font-mono"}>
-            {typeof alert.value === "number" && alert.value < 10
-              ? alert.value.toFixed(2)
-              : alert.value}
-          </span>
-        </span>
-        <span className="text-gray-600">gasto 7d: R${alert.spend_7d?.toFixed(0)}</span>
-      </div>
-
-      <p className="text-xs text-gray-300 pl-6">{alert.action}</p>
+      <p className="text-xs text-gray-300 pl-6">{alert.msg}</p>
     </div>
   );
 }
@@ -140,24 +113,13 @@ function OpportunityCard({ opp }: { opp: Opportunity }) {
       <div className="flex items-center gap-2">
         <TrendingUp size={16} className="text-emerald-400 shrink-0" />
         <span className="text-sm font-medium text-white truncate max-w-[260px]">
-          {opp.adset}
+          {opp.brand}
         </span>
         <span className="ml-auto text-[10px] bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded-full font-mono shrink-0">
           ESCALAR
         </span>
       </div>
-      <div className="flex items-center gap-4 text-xs text-gray-400 pl-6">
-        <span>
-          <span className="text-gray-500">{opp.metric}:</span>{" "}
-          <span className="text-emerald-400 font-mono">
-            {typeof opp.value === "number" && opp.value < 20
-              ? opp.value.toFixed(2)
-              : opp.value}
-          </span>
-        </span>
-        <span className="text-gray-600">gasto 7d: R${opp.spend_7d?.toFixed(0)}</span>
-      </div>
-      <p className="text-xs text-gray-300 pl-6">{opp.action}</p>
+      <p className="text-xs text-gray-300 pl-6">{opp.msg}</p>
     </div>
   );
 }
