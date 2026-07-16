@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 import base64
+from datetime import datetime, timedelta
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
 from pydantic import BaseModel, field_validator
-from sqlalchemy import select
+from sqlalchemy import select, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_user
 from app.core.exceptions import MetaAPIError
 from app.core.logging import logger
-from app.db.models import User, Campaign, MetaAccount
+from app.db.models import User, Campaign, MetaAccount, AdSet, Ad, AdMetric
 from app.db.session import get_db
 from app.infrastructure.meta_api.client import MetaAdsClient
 from app.infrastructure.repositories.meta_account_repository import MetaAccountRepository
@@ -76,6 +77,10 @@ class CampaignOut(BaseModel):
     status: str | None
     objective: str | None
     daily_budget: float | None
+    # 7-day metrics (None if no data yet)
+    spend_7d: float | None = None
+    conversions_7d: int | None = None
+    roas_7d: float | None = None
 
 
 class CampaignCreateRequest(BaseModel):
@@ -183,11 +188,85 @@ async def list_campaigns(
         q = q.where(Campaign.meta_account_id == account_id)
     result = await db.execute(q.limit(500))
     campaigns = result.scalars().all()
+
+    # Aggregate 7-day metrics per campaign
+    since = datetime.utcnow() - timedelta(days=7)
+    campaign_ids = [str(c.id) for c in campaigns]
+
+    metrics_map: dict[str, dict] = {}
+    if campaign_ids:
+        metrics_q = (
+            select(
+                Campaign.id.label("campaign_id"),
+                func.sum(AdMetric.spend).label("spend"),
+                func.sum(AdMetric.conversions).label("conversions"),
+                func.sum(AdMetric.revenue).label("revenue"),
+            )
+            .select_from(Campaign)
+            .join(AdSet, AdSet.campaign_id == Campaign.id)
+            .join(Ad, Ad.adset_id == AdSet.id)
+            .join(AdMetric, and_(AdMetric.ad_id == Ad.id, AdMetric.date >= since))
+            .where(Campaign.id.in_(campaign_ids))
+            .group_by(Campaign.id)
+        )
+        metrics_result = await db.execute(metrics_q)
+        for row in metrics_result.all():
+            spend = float(row.spend or 0)
+            revenue = float(row.revenue or 0)
+            metrics_map[str(row.campaign_id)] = {
+                "spend_7d": round(spend, 2),
+                "conversions_7d": int(row.conversions or 0),
+                "roas_7d": round(revenue / spend, 2) if spend > 0 else None,
+            }
+
     return [CampaignOut(
-        id=str(c.id), meta_campaign_id=c.meta_campaign_id,
-        name=c.name, status=c.status, objective=c.objective,
+        id=str(c.id),
+        meta_campaign_id=c.meta_campaign_id,
+        name=c.name,
+        status=c.status,
+        objective=c.objective,
         daily_budget=c.daily_budget,
+        **metrics_map.get(str(c.id), {}),
     ) for c in campaigns]
+
+
+@router.put("/{campaign_id}/status")
+async def update_campaign_status(
+    campaign_id: str,
+    body: dict,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Toggle campaign status between ACTIVE and PAUSED on Meta and in our DB."""
+    new_status = body.get("status", "").upper()
+    if new_status not in ("ACTIVE", "PAUSED"):
+        raise HTTPException(status_code=400, detail="Status deve ser ACTIVE ou PAUSED")
+
+    # Find campaign + verify tenant ownership
+    result = await db.execute(
+        select(Campaign, MetaAccount)
+        .join(MetaAccount, Campaign.meta_account_id == MetaAccount.id)
+        .where(
+            Campaign.id == campaign_id,
+            MetaAccount.tenant_id == current_user.tenant_id,
+        )
+    )
+    row = result.one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Campanha não encontrada")
+
+    campaign, account = row
+    client = MetaAdsClient(account.access_token, account.ad_account_id)
+    try:
+        await client.update_campaign_status(campaign.meta_campaign_id, new_status)
+        campaign.status = new_status
+        await db.flush()
+        logger.info("campaign.status_updated", campaign_id=campaign_id, status=new_status)
+        return {"ok": True, "status": new_status}
+    except MetaAPIError as exc:
+        raise HTTPException(status_code=400, detail=translate_meta_error(str(exc)))
+    finally:
+        await client.close()
 
 
 @router.get("/objectives")

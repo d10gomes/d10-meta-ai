@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_MINUTES: int = 1440
 
+    # Telegram bot for notifications
+    TELEGRAM_BOT_TOKEN: str = ""
+
     # Scheduler
     SCANNER_INTERVAL_MINUTES: int = 30
     DOCTOR_INTERVAL_MINUTES: int = 60

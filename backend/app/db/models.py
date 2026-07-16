@@ -29,6 +29,9 @@ class Tenant(Base):
     slug = Column(String(100), nullable=False, unique=True)
     is_active = Column(Boolean, default=True)
     max_meta_accounts = Column(Integer, default=15)
+    # Notification channels
+    telegram_chat_id = Column(String(100), nullable=True)
+    whatsapp_number = Column(String(30), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     users = relationship("User", back_populates="tenant", lazy="selectin")

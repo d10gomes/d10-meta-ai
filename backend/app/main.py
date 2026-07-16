@@ -18,6 +18,21 @@ from app.db.session import engine, Base
 from app.infrastructure.cache.redis_client import redis_client
 
 
+async def _run_migrations():
+    """Add new columns without Alembic — safe to run on every startup."""
+    migrations = [
+        "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS telegram_chat_id VARCHAR(100)",
+        "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS whatsapp_number VARCHAR(30)",
+    ]
+    try:
+        async with engine.begin() as conn:
+            for sql in migrations:
+                await conn.execute(sqlalchemy.text(sql))
+        logger.info("migrations.done")
+    except Exception as exc:
+        logger.warning("migrations.failed", error=str(exc))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     configure_logging()
@@ -28,6 +43,7 @@ async def lifespan(app: FastAPI):
         logger.info("db.connected")
     except Exception as exc:
         logger.warning("db.connection_warning", error=str(exc))
+    await _run_migrations()
     try:
         async with asyncio.timeout(3):
             await redis_client.ping()

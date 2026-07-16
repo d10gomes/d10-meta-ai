@@ -141,7 +141,7 @@ Escreva o relatório diretamente, pronto para envio.""",
         import os
 
         # Telegram — gratuito, prioritário
-        tg_token = os.getenv("TELEGRAM_BOT_TOKEN", "8977629545:AAFY3QF9LOSdbFAI5dNhwzX8hYvaveQGYKw")
+        tg_token = settings.TELEGRAM_BOT_TOKEN or os.getenv("TELEGRAM_BOT_TOKEN", "")
         if tg_token and phone:
             try:
                 async with httpx.AsyncClient(timeout=15) as client:
