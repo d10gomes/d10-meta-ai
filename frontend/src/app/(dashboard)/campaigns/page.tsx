@@ -195,8 +195,14 @@ function CampaignsInner() {
                     <td className="py-3 pr-3">
                       <span title={health.label}>{health.icon}</span>
                     </td>
-                    <td className="py-3 pr-3 text-white font-medium max-w-[200px] truncate" title={c.name ?? ""}>
-                      {c.name || "—"}
+                    <td className="py-3 pr-3 max-w-[200px] truncate">
+                      <Link
+                        href={`/campaigns/${c.id}`}
+                        className="text-white font-medium hover:text-brand-400 transition-colors"
+                        title={c.name ?? ""}
+                      >
+                        {c.name || "—"}
+                      </Link>
                     </td>
                     <td className="py-3 pr-3 text-gray-400 text-xs whitespace-nowrap">
                       {translateObjective(c.objective)}

@@ -269,6 +269,184 @@ async def update_campaign_status(
         await client.close()
 
 
+@router.get("/{campaign_id}/detail")
+async def get_campaign_detail(
+    campaign_id: str,
+    days: int = Query(30, ge=1, le=90),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Retorna detalhes de uma campanha: info, timeline diária, adsets, ads e ações."""
+    since = datetime.utcnow() - timedelta(days=days)
+
+    # Campaign + ownership check
+    result = await db.execute(
+        select(Campaign, MetaAccount)
+        .join(MetaAccount, Campaign.meta_account_id == MetaAccount.id)
+        .where(Campaign.id == campaign_id, MetaAccount.tenant_id == current_user.tenant_id)
+    )
+    row = result.one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Campanha não encontrada")
+    campaign, account = row
+
+    # Daily timeline
+    timeline_q = await db.execute(
+        select(
+            func.date_trunc("day", AdMetric.date).label("day"),
+            func.sum(AdMetric.spend).label("spend"),
+            func.sum(AdMetric.conversions).label("conversions"),
+            func.sum(AdMetric.impressions).label("impressions"),
+            func.sum(AdMetric.clicks).label("clicks"),
+            func.avg(AdMetric.roas).label("roas"),
+        )
+        .join(Ad, AdMetric.ad_id == Ad.id)
+        .join(AdSet, Ad.adset_id == AdSet.id)
+        .where(AdSet.campaign_id == campaign_id, AdMetric.date >= since)
+        .group_by(func.date_trunc("day", AdMetric.date))
+        .order_by(func.date_trunc("day", AdMetric.date))
+    )
+    timeline = [
+        {
+            "day": r.day.date().isoformat(),
+            "spend": round(float(r.spend or 0), 2),
+            "conversions": int(r.conversions or 0),
+            "impressions": int(r.impressions or 0),
+            "clicks": int(r.clicks or 0),
+            "roas": round(float(r.roas or 0), 2),
+        }
+        for r in timeline_q.all()
+    ]
+
+    # AdSets with aggregated metrics
+    adsets_q = await db.execute(
+        select(
+            AdSet.id,
+            AdSet.name,
+            AdSet.status,
+            AdSet.daily_budget,
+            func.sum(AdMetric.spend).label("spend"),
+            func.sum(AdMetric.conversions).label("conversions"),
+            func.sum(AdMetric.impressions).label("impressions"),
+            func.sum(AdMetric.clicks).label("clicks"),
+            func.avg(AdMetric.roas).label("roas"),
+            func.avg(AdMetric.cpa).label("cpa"),
+            func.avg(AdMetric.ctr).label("ctr"),
+            func.avg(AdMetric.frequency).label("frequency"),
+        )
+        .join(Ad, Ad.adset_id == AdSet.id)
+        .join(AdMetric, and_(AdMetric.ad_id == Ad.id, AdMetric.date >= since))
+        .where(AdSet.campaign_id == campaign_id)
+        .group_by(AdSet.id, AdSet.name, AdSet.status, AdSet.daily_budget)
+        .order_by(func.sum(AdMetric.spend).desc())
+    )
+    adsets = [
+        {
+            "id": str(r.id),
+            "name": r.name,
+            "status": r.status,
+            "daily_budget": r.daily_budget,
+            "spend": round(float(r.spend or 0), 2),
+            "conversions": int(r.conversions or 0),
+            "impressions": int(r.impressions or 0),
+            "clicks": int(r.clicks or 0),
+            "roas": round(float(r.roas or 0), 2),
+            "cpa": round(float(r.cpa or 0), 2),
+            "ctr": round(float(r.ctr or 0), 2),
+            "frequency": round(float(r.frequency or 0), 2),
+        }
+        for r in adsets_q.all()
+    ]
+
+    # Recent agent actions for this campaign
+    actions_q = await db.execute(
+        select(AgentAction)
+        .where(
+            AgentAction.tenant_id == current_user.tenant_id,
+            AgentAction.entity_id == campaign_id,
+        )
+        .order_by(AgentAction.created_at.desc())
+        .limit(20)
+    )
+    actions = [
+        {
+            "id": str(a.id),
+            "action_type": a.action_type,
+            "status": a.status,
+            "payload": a.payload,
+            "created_at": a.created_at.isoformat(),
+            "executed_at": a.executed_at.isoformat() if a.executed_at else None,
+            "error": a.error,
+        }
+        for a in actions_q.scalars().all()
+    ]
+
+    # Totals for the period
+    total_spend = sum(d["spend"] for d in timeline)
+    total_conversions = sum(d["conversions"] for d in timeline)
+
+    return {
+        "id": campaign_id,
+        "meta_campaign_id": campaign.meta_campaign_id,
+        "name": campaign.name,
+        "status": campaign.status,
+        "objective": campaign.objective,
+        "daily_budget": campaign.daily_budget,
+        "account_name": account.name,
+        "created_at": campaign.created_at.isoformat() if campaign.created_at else None,
+        "period_days": days,
+        "total_spend": round(total_spend, 2),
+        "total_conversions": total_conversions,
+        "timeline": timeline,
+        "adsets": adsets,
+        "actions": actions,
+    }
+
+
+class BudgetUpdateRequest(BaseModel):
+    daily_budget_brl: float
+
+    @field_validator("daily_budget_brl")
+    @classmethod
+    def budget_minimum(cls, v: float) -> float:
+        if v < 6:
+            raise ValueError("Orçamento mínimo é R$ 6,00 por dia")
+        return v
+
+
+@router.put("/{campaign_id}/budget")
+async def update_campaign_budget(
+    campaign_id: str,
+    body: BudgetUpdateRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Atualiza o orçamento diário de uma campanha no Meta e no banco local."""
+    result = await db.execute(
+        select(Campaign, MetaAccount)
+        .join(MetaAccount, Campaign.meta_account_id == MetaAccount.id)
+        .where(Campaign.id == campaign_id, MetaAccount.tenant_id == current_user.tenant_id)
+    )
+    row = result.one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Campanha não encontrada")
+
+    campaign, account = row
+    client = MetaAdsClient(account.access_token, account.ad_account_id)
+    daily_budget_cents = int(body.daily_budget_brl * 100)
+
+    try:
+        await client.update_campaign_budget(campaign.meta_campaign_id, daily_budget_cents)
+        campaign.daily_budget = body.daily_budget_brl
+        await db.flush()
+        logger.info("campaign.budget_updated", campaign_id=campaign_id, budget=body.daily_budget_brl)
+        return {"ok": True, "daily_budget": body.daily_budget_brl}
+    except MetaAPIError as exc:
+        raise HTTPException(status_code=400, detail=translate_meta_error(str(exc)))
+    finally:
+        await client.close()
+
+
 @router.get("/objectives")
 async def list_objectives(_: User = Depends(get_current_user)):
     """Return available objectives with wizard labels."""
