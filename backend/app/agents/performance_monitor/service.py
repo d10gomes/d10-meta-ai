@@ -77,7 +77,7 @@ class PerformanceMonitor(AgentBase):
     name = "performance_monitor"
 
     def __init__(self, session: AsyncSession):
-        super().__init__(session)
+        super().__init__(session, "")
         self.session = session
         self._anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
 

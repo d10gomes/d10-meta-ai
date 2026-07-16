@@ -218,6 +218,15 @@ async def job_performance_monitor():
         logger.error("performance_monitor.scheduled_error", error=str(exc))
 
 
+async def job_campaign_manager():
+    logger.info("campaign_manager.scheduled_start")
+    try:
+        from app.agents.campaign_manager.service import CampaignManagerService
+        await _run_per_tenant(CampaignManagerService, "campaign_manager")
+    except Exception as exc:
+        logger.error("campaign_manager.scheduled_error", error=str(exc))
+
+
 async def job_learning():
     logger.info("learning.scheduled_start")
     try:
@@ -312,7 +321,17 @@ def setup_scheduler():
         misfire_grace_time=600,
     )
 
-    # 9. Learning — extrai lições às 23h00 (depois dos dados do dia)
+    # 9. Campaign Manager — pausa losers, identifica winners (a cada 3h)
+    scheduler.add_job(
+        job_campaign_manager,
+        CronTrigger(hour="3,9,15,21", minute=0),
+        id="campaign_manager",
+        name="Campaign Manager — Gestão de Ciclo de Vida",
+        replace_existing=True,
+        misfire_grace_time=300,
+    )
+
+    # 10. Learning — extrai lições às 23h00 (depois dos dados do dia)
     scheduler.add_job(
         job_learning,
         CronTrigger(hour=23, minute=0),
@@ -322,7 +341,7 @@ def setup_scheduler():
         misfire_grace_time=600,
     )
 
-    # 10. Performance Monitor — análise contínua 24h (00h, 06h, 12h, 18h + 50min)
+    # 11. Performance Monitor — análise contínua 24h (00h, 06h, 12h, 18h + 50min)
     scheduler.add_job(
         job_performance_monitor,
         CronTrigger(hour="0,6,12,18", minute=50),
@@ -333,3 +352,18 @@ def setup_scheduler():
     )
 
     logger.info("scheduler.configured", jobs=len(scheduler.get_jobs()))
+
+"""
+Pipeline completo (horário de Brasília):
+  00h,06h,12h,18h+00m → Scanner
+  00h,06h,12h,18h+15m → Analyst  (lê Scanner, detecta sazonalidade)
+  00h,06h,12h,18h+25m → Doctor
+  00h,06h,12h,18h+35m → Decision (lê lições do Brain)
+  00h,06h,12h,18h+40m → Creative
+  00h,06h,12h,18h+50m → Performance Monitor (publica na KB, alerta crítico imediato)
+  01h,07h,13h,19h+00m → Budget Optimizer
+  03h,09h,15h,21h+00m → Campaign Manager (Claude decide pausar/escalar)
+  *h+50m              → Executor (com feedback loop para KB)
+  08h+00m             → WhatsApp (relatório por marca)
+  23h+00m             → Learning
+"""

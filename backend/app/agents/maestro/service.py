@@ -286,15 +286,17 @@ Crie o plano de execução completo em JSON.""",
     def _load_agent(self, agent_name: str, tenant_id: str):
         """Dynamic agent instantiation — avoids circular imports."""
         registry = {
-            "scanner":          ("app.agents.scanner.service", "ScannerService"),
-            "analyst":          ("app.agents.analyst.service", "AnalystService"),
-            "doctor":           ("app.agents.doctor.service", "DoctorService"),
-            "decision":         ("app.agents.decision.service", "DecisionService"),
-            "creative":         ("app.agents.creative.service", "CreativeService"),
-            "budget_optimizer": ("app.agents.budget_optimizer.service", "BudgetOptimizerService"),
-            "whatsapp":         ("app.agents.whatsapp.service", "WhatsAppService"),
-            "learning":         ("app.agents.learning.service", "LearningService"),
-            "simulation":       ("app.agents.simulation.service", "SimulationService"),
+            "scanner":            ("app.agents.scanner.service", "ScannerService"),
+            "analyst":            ("app.agents.analyst.service", "AnalystService"),
+            "doctor":             ("app.agents.doctor.service", "DoctorService"),
+            "decision":           ("app.agents.decision.service", "DecisionService"),
+            "creative":           ("app.agents.creative.service", "CreativeService"),
+            "budget_optimizer":   ("app.agents.budget_optimizer.service", "BudgetOptimizerService"),
+            "whatsapp":           ("app.agents.whatsapp.service", "WhatsAppService"),
+            "learning":           ("app.agents.learning.service", "LearningService"),
+            "simulation":         ("app.agents.simulation.service", "SimulationService"),
+            "campaign_manager":   ("app.agents.campaign_manager.service", "CampaignManagerService"),
+            "performance_monitor":("app.agents.performance_monitor.service", "PerformanceMonitor"),
         }
 
         entry = registry.get(agent_name)

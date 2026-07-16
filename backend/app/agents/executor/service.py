@@ -18,7 +18,7 @@ class ExecutorService(AgentBase):
     name = "executor"
 
     def __init__(self, session: AsyncSession):
-        super().__init__(session)
+        super().__init__(session, "")
         self._session = session
         self._account_repo = MetaAccountRepository(session)
 
