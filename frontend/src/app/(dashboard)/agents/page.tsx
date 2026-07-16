@@ -2,6 +2,7 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
+import { AGENT_NAMES, AGENT_DESCRIPTIONS } from "@/lib/labels";
 import { Scan, Stethoscope, Zap, MessageCircle, Clock, CheckCircle2, XCircle, Loader2, Play, RefreshCw, Brain, DollarSign, Target, ChevronDown, ChevronUp } from "lucide-react";
 
 type AgentStatus = {
@@ -63,37 +64,45 @@ const TRIGGER_ENDPOINT: Record<string, string> = {
   whatsapp: "/agents/report/whatsapp",
   analyst: "/agents/analyze",
   budget_optimizer: "/agents/optimize-budget",
-  campaign_manager: "/agents/manage-campaigns",
 };
+
+const STATUS_CONFIG: Record<string, { label: string; icon: React.ReactNode; color: string }> = {
+  success: {
+    label: "Último: OK",
+    icon: <CheckCircle2 size={12} />,
+    color: "text-green-400",
+  },
+  failed: {
+    label: "Último: Falhou",
+    icon: <XCircle size={12} />,
+    color: "text-red-400",
+  },
+  running: {
+    label: "Executando agora",
+    icon: <Loader2 size={12} className="animate-spin" />,
+    color: "text-yellow-400",
+  },
+};
+
+function StatusBadge({ status }: { status: string }) {
+  const cfg = STATUS_CONFIG[status];
+  if (!cfg) return <span className="text-gray-500 text-xs">Nunca executou</span>;
+  return (
+    <span className={`flex items-center gap-1 text-xs font-medium ${cfg.color}`}>
+      {cfg.icon} {cfg.label}
+    </span>
+  );
+}
 
 function formatDuration(secs: number | null) {
   if (!secs) return "—";
-  if (secs < 60) return `${secs.toFixed(1)}s`;
+  if (secs < 60) return `${secs.toFixed(0)}s`;
   return `${Math.floor(secs / 60)}m ${Math.round(secs % 60)}s`;
 }
 
 function formatDate(iso: string | null) {
   if (!iso) return "—";
   return new Date(iso).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" });
-}
-
-function StatusBadge({ status }: { status: string }) {
-  if (status === "success") return (
-    <span className="flex items-center gap-1 text-green-400 text-xs font-medium">
-      <CheckCircle2 size={12} /> Sucesso
-    </span>
-  );
-  if (status === "failed") return (
-    <span className="flex items-center gap-1 text-red-400 text-xs font-medium">
-      <XCircle size={12} /> Falhou
-    </span>
-  );
-  if (status === "running") return (
-    <span className="flex items-center gap-1 text-yellow-400 text-xs font-medium">
-      <Loader2 size={12} className="animate-spin" /> Executando
-    </span>
-  );
-  return <span className="text-gray-500 text-xs">Nunca executou</span>;
 }
 
 export default function AgentsPage() {
@@ -131,7 +140,7 @@ export default function AgentsPage() {
   const trigger = useMutation({
     mutationFn: (agentId: string) => api.post(TRIGGER_ENDPOINT[agentId]),
     onSuccess: (_, agentId) => {
-      showToast(`${agentId} iniciado! Aguarde alguns minutos.`);
+      showToast(`${AGENT_NAMES[agentId] || agentId} iniciado! Aguarde alguns minutos.`);
       setTimeout(() => {
         qc.invalidateQueries({ queryKey: ["agents-status"] });
         qc.invalidateQueries({ queryKey: ["agent-runs"] });
@@ -141,6 +150,9 @@ export default function AgentsPage() {
   });
 
   const agents: AgentStatus[] = statusData?.agents ?? [];
+
+  const agentName = (a: AgentStatus) => AGENT_NAMES[a.id] || a.name;
+  const agentDescription = (a: AgentStatus) => AGENT_DESCRIPTIONS[a.id] || a.description;
 
   return (
     <div className="space-y-6">
@@ -152,11 +164,11 @@ export default function AgentsPage() {
 
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-2xl font-bold">Agentes de IA Autônomos</h2>
+          <h2 className="text-2xl font-bold">Agentes Automáticos</h2>
           <p className="text-gray-400 text-sm mt-1">
             {statusData?.scheduler_running
-              ? "✅ Scheduler ativo — agentes executam automaticamente"
-              : "⚠️ Scheduler inativo"}
+              ? "✅ Sistema ativo — agentes trabalham automaticamente para você"
+              : "⚠️ Sistema pausado"}
           </p>
         </div>
         <button
@@ -170,7 +182,6 @@ export default function AgentsPage() {
         </button>
       </div>
 
-      {/* Agent cards */}
       {isLoading ? (
         <div className="flex items-center justify-center h-40 text-gray-500">
           <Loader2 size={24} className="animate-spin mr-2" /> Carregando agentes...
@@ -197,18 +208,13 @@ export default function AgentsPage() {
                     </div>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center justify-between gap-2">
-                        <h3 className="font-semibold text-white text-sm">{agent.name}</h3>
+                        <h3 className="font-semibold text-white text-sm">{agentName(agent)}</h3>
                         <StatusBadge status={agent.last_run?.status ?? "never"} />
                       </div>
-                      <p className="text-xs text-gray-400 mt-1">{agent.description}</p>
+                      <p className="text-xs text-gray-400 mt-1">{agentDescription(agent)}</p>
                       <div className="mt-2 text-xs text-gray-500 space-y-0.5">
                         <div className="flex items-center gap-1"><Clock size={10} /> {agent.schedule}</div>
-                        <div>Próx: <span className="text-gray-300">{formatDate(agent.next_run)}</span></div>
-                        {agent.last_run?.error && (
-                          <div className="text-red-400 truncate" title={agent.last_run.error}>
-                            ⚠ {agent.last_run.error.slice(0, 60)}
-                          </div>
-                        )}
+                        <div>Próxima execução: <span className="text-gray-300">{formatDate(agent.next_run)}</span></div>
                       </div>
                     </div>
                   </div>
@@ -229,81 +235,81 @@ export default function AgentsPage() {
           {/* Infra agents */}
           <div>
             <p className="text-xs text-gray-500 uppercase tracking-wider mb-3 flex items-center gap-1">
-              <Zap size={11} /> Agentes de Infraestrutura
+              <Zap size={11} /> Agentes de Suporte
             </p>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {agents.filter((a) => a.category !== "specialist").map((agent) => (
-            <div
-              key={agent.id}
-              className={`card cursor-pointer border transition-colors ${
-                selectedAgent === agent.id
-                  ? "border-brand-500"
-                  : "border-transparent hover:border-gray-600"
-              }`}
-              onClick={() => setSelectedAgent(selectedAgent === agent.id ? null : agent.id)}
-            >
-              <div className="flex items-start gap-4">
-                <div className="bg-brand-500/10 p-3 rounded-xl text-brand-500 flex-shrink-0">
-                  {ICON_MAP[agent.id]}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center justify-between gap-2">
-                    <h3 className="font-semibold text-white">{agent.name}</h3>
-                    <StatusBadge status={agent.last_run?.status ?? "never"} />
-                  </div>
-                  <p className="text-xs text-gray-400 mt-1">{agent.description}</p>
-
-                  <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-gray-500">
-                    <span className="flex items-center gap-1">
-                      <Clock size={11} /> {agent.schedule}
-                    </span>
-                    <span>
-                      Próxima: <span className="text-gray-300">{formatDate(agent.next_run)}</span>
-                    </span>
-                    <span>
-                      Última: <span className="text-gray-300">{formatDate(agent.last_run?.started_at ?? null)}</span>
-                    </span>
-                    <span>
-                      Duração: <span className="text-gray-300">{formatDuration(agent.last_run?.duration_seconds ?? null)}</span>
-                    </span>
-                    {agent.last_run?.items_processed != null && (
-                      <span className="col-span-2">
-                        Itens processados: <span className="text-gray-300">{agent.last_run.items_processed}</span>
-                      </span>
-                    )}
-                    {agent.last_run?.error && (
-                      <span className="col-span-2 text-red-400 truncate" title={agent.last_run.error}>
-                        ⚠ {agent.last_run.error.slice(0, 80)}
-                      </span>
-                    )}
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex justify-end mt-4">
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    trigger.mutate(agent.id);
-                  }}
-                  disabled={trigger.isPending || !TRIGGER_ENDPOINT[agent.id]}
-                  className="btn-primary text-xs flex items-center gap-1"
+              {agents.filter((a) => a.category !== "specialist").map((agent) => (
+                <div
+                  key={agent.id}
+                  className={`card cursor-pointer border transition-colors ${
+                    selectedAgent === agent.id
+                      ? "border-brand-500"
+                      : "border-transparent hover:border-gray-600"
+                  }`}
+                  onClick={() => setSelectedAgent(selectedAgent === agent.id ? null : agent.id)}
                 >
-                  <Play size={12} /> Executar agora
-                </button>
-              </div>
-            </div>
-          ))}
+                  <div className="flex items-start gap-4">
+                    <div className="bg-brand-500/10 p-3 rounded-xl text-brand-500 flex-shrink-0">
+                      {ICON_MAP[agent.id]}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between gap-2">
+                        <h3 className="font-semibold text-white">{agentName(agent)}</h3>
+                        <StatusBadge status={agent.last_run?.status ?? "never"} />
+                      </div>
+                      <p className="text-xs text-gray-400 mt-1">{agentDescription(agent)}</p>
+
+                      <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-gray-500">
+                        <span className="flex items-center gap-1">
+                          <Clock size={11} /> {agent.schedule}
+                        </span>
+                        <span>
+                          Próxima: <span className="text-gray-300">{formatDate(agent.next_run)}</span>
+                        </span>
+                        <span>
+                          Última: <span className="text-gray-300">{formatDate(agent.last_run?.started_at ?? null)}</span>
+                        </span>
+                        <span>
+                          Duração: <span className="text-gray-300">{formatDuration(agent.last_run?.duration_seconds ?? null)}</span>
+                        </span>
+                        {agent.last_run?.items_processed != null && (
+                          <span className="col-span-2">
+                            Itens processados: <span className="text-gray-300">{agent.last_run.items_processed}</span>
+                          </span>
+                        )}
+                        {agent.last_run?.error && (
+                          <span className="col-span-2 text-red-400 truncate" title={agent.last_run.error}>
+                            ⚠ {agent.last_run.error.slice(0, 80)}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex justify-end mt-4">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        trigger.mutate(agent.id);
+                      }}
+                      disabled={trigger.isPending || !TRIGGER_ENDPOINT[agent.id]}
+                      className="btn-primary text-xs flex items-center gap-1"
+                    >
+                      <Play size={12} /> Executar agora
+                    </button>
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
         </>
       )}
 
-      {/* Agent insights from specialist agents */}
+      {/* Agent insights */}
       {insightsData && insightsData.length > 0 && (
         <div className="space-y-3">
           <h3 className="font-semibold text-white flex items-center gap-2">
-            <Brain size={16} className="text-brand-400" /> Relatórios dos Agentes Especialistas
+            <Brain size={16} className="text-brand-400" /> Últimos relatórios dos agentes
           </h3>
           {(insightsData as AgentInsight[]).map((insight) => (
             <div key={insight.id} className="card border border-gray-800">
@@ -325,7 +331,10 @@ export default function AgentsPage() {
                     </span>
                   )}
                   <span className="text-xs text-gray-500">{formatDate(insight.created_at)}</span>
-                  {expandedInsight === insight.id ? <ChevronUp size={14} className="text-gray-500" /> : <ChevronDown size={14} className="text-gray-500" />}
+                  {expandedInsight === insight.id
+                    ? <ChevronUp size={14} className="text-gray-500" />
+                    : <ChevronDown size={14} className="text-gray-500" />
+                  }
                 </div>
               </div>
               {expandedInsight === insight.id && (
@@ -344,10 +353,10 @@ export default function AgentsPage() {
       <div className="card">
         <div className="flex items-center justify-between mb-4">
           <h3 className="font-semibold text-white">
-            Histórico de Execuções
+            Histórico de execuções
             {selectedAgent && (
               <span className="ml-2 text-brand-400 text-sm font-normal">
-                — {agents.find((a) => a.id === selectedAgent)?.name}
+                — {AGENT_NAMES[selectedAgent] || selectedAgent}
               </span>
             )}
           </h3>
@@ -372,7 +381,7 @@ export default function AgentsPage() {
                   <th className="text-left pb-2 pr-4">Início</th>
                   <th className="text-left pb-2 pr-4">Duração</th>
                   <th className="text-left pb-2 pr-4">Itens</th>
-                  <th className="text-left pb-2 pr-4">Trigger</th>
+                  <th className="text-left pb-2 pr-4">Tipo</th>
                   <th className="text-left pb-2">Status</th>
                 </tr>
               </thead>
@@ -380,22 +389,21 @@ export default function AgentsPage() {
                 {(runsData as AgentRun[]).map((run) => (
                   <tr key={run.id} className="hover:bg-gray-800/30 transition-colors">
                     <td className="py-2 pr-4 font-medium text-gray-300">
-                      {ICON_MAP[run.agent_name] && (
-                        <span className="inline-flex items-center gap-1 text-brand-400">
-                          {ICON_MAP[run.agent_name]} {run.agent_name}
-                        </span>
-                      )}
+                      <span className="inline-flex items-center gap-1 text-brand-400">
+                        {ICON_MAP[run.agent_name]}
+                        <span className="text-gray-300 text-xs">{AGENT_NAMES[run.agent_name] || run.agent_name}</span>
+                      </span>
                     </td>
-                    <td className="py-2 pr-4 text-gray-400">{formatDate(run.started_at)}</td>
-                    <td className="py-2 pr-4 text-gray-400">{formatDuration(run.duration_seconds)}</td>
-                    <td className="py-2 pr-4 text-gray-400">{run.items_processed ?? "—"}</td>
+                    <td className="py-2 pr-4 text-gray-400 text-xs">{formatDate(run.started_at)}</td>
+                    <td className="py-2 pr-4 text-gray-400 text-xs">{formatDuration(run.duration_seconds)}</td>
+                    <td className="py-2 pr-4 text-gray-400 text-xs">{run.items_processed ?? "—"}</td>
                     <td className="py-2 pr-4">
                       <span className={`text-xs px-2 py-0.5 rounded-full ${
                         run.trigger === "manual"
                           ? "bg-blue-500/10 text-blue-400"
                           : "bg-gray-700 text-gray-400"
                       }`}>
-                        {run.trigger === "manual" ? "manual" : "auto"}
+                        {run.trigger === "manual" ? "Manual" : "Automático"}
                       </span>
                     </td>
                     <td className="py-2">
