@@ -139,7 +139,7 @@ function TopCard({ rank, creative, metric }: { rank: number; creative: Creative;
 // ── Página ────────────────────────────────────────────────────────────────────
 
 export default function CreativesPage() {
-  const [period, setPeriod] = useState(PERIODS[2]);
+  const [period, setPeriod] = useState<(typeof PERIODS)[number]>(PERIODS[2]);
   const [sort, setSort]     = useState<string>("roas");
   const [search, setSearch] = useState("");
   const [gradeFilter, setGradeFilter] = useState<string>("");
