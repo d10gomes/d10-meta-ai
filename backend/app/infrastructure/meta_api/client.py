@@ -229,5 +229,118 @@ class MetaAdsClient:
         finally:
             os.unlink(tmp_path)
 
+    # ── Campaign Creation ──────────────────────────────────────────────────────
+
+    async def get_pages(self) -> List[Dict]:
+        """Return Facebook Pages accessible by this token."""
+        data = await self._get("/me/accounts", {"fields": "id,name"})
+        return data.get("data", [])
+
+    async def create_campaign(
+        self,
+        name: str,
+        objective: str,
+        daily_budget_cents: int,
+    ) -> str:
+        """Create a PAUSED campaign and return its Meta campaign ID."""
+        data = await self._post(
+            f"/act_{self.ad_account_id}/campaigns",
+            json={
+                "name": name,
+                "objective": objective,
+                "status": "PAUSED",
+                "daily_budget": str(daily_budget_cents),
+                "special_ad_categories": [],
+            },
+        )
+        if "id" not in data:
+            raise MetaAPIError(f"Campaign creation failed: {data}")
+        return data["id"]
+
+    async def create_adset(
+        self,
+        campaign_id: str,
+        name: str,
+        daily_budget_cents: int,
+        optimization_goal: str,
+        billing_event: str,
+        targeting: Dict,
+    ) -> str:
+        """Create a PAUSED adset and return its Meta adset ID."""
+        data = await self._post(
+            f"/act_{self.ad_account_id}/adsets",
+            json={
+                "name": name,
+                "campaign_id": campaign_id,
+                "daily_budget": str(daily_budget_cents),
+                "billing_event": billing_event,
+                "optimization_goal": optimization_goal,
+                "targeting": targeting,
+                "status": "PAUSED",
+                "bid_strategy": "LOWEST_COST_WITHOUT_CAP",
+            },
+        )
+        if "id" not in data:
+            raise MetaAPIError(f"AdSet creation failed: {data}")
+        return data["id"]
+
+    async def create_image_creative(
+        self,
+        page_id: str,
+        image_hash: str,
+        headline: str,
+        body: str,
+        link: str,
+        cta_type: str = "LEARN_MORE",
+    ) -> str:
+        """Create a link-ad creative with an image and return creative ID."""
+        data = await self._post(
+            f"/act_{self.ad_account_id}/adcreatives",
+            json={
+                "name": f"Creative — {headline[:40]}",
+                "object_story_spec": {
+                    "page_id": page_id,
+                    "link_data": {
+                        "image_hash": image_hash,
+                        "link": link,
+                        "name": headline,
+                        "message": body,
+                        "call_to_action": {
+                            "type": cta_type,
+                            "value": {"link": link},
+                        },
+                    },
+                },
+            },
+        )
+        if "id" not in data:
+            raise MetaAPIError(f"Creative creation failed: {data}")
+        return data["id"]
+
+    async def create_ad(self, adset_id: str, name: str, creative_id: str) -> str:
+        """Create a PAUSED ad and return its Meta ad ID."""
+        data = await self._post(
+            f"/act_{self.ad_account_id}/ads",
+            json={
+                "name": name,
+                "adset_id": adset_id,
+                "creative": {"creative_id": creative_id},
+                "status": "PAUSED",
+            },
+        )
+        if "id" not in data:
+            raise MetaAPIError(f"Ad creation failed: {data}")
+        return data["id"]
+
+    async def delete_object(self, object_id: str) -> None:
+        """Delete any Meta Ads object (campaign/adset/ad) by ID — used for rollback."""
+        try:
+            await self._http.delete(
+                f"{BASE_URL}/{object_id}",
+                params={"access_token": self.access_token},
+            )
+        except Exception:
+            pass  # best-effort rollback
+
     async def close(self):
         await self._http.aclose()

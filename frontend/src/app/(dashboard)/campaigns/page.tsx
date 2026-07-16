@@ -1,5 +1,8 @@
 "use client";
 import { useQuery } from "@tanstack/react-query";
+import { useSearchParams } from "next/navigation";
+import Link from "next/link";
+import { Plus } from "lucide-react";
 import { api } from "@/lib/api";
 import { translateObjective, translateStatus, formatBudget } from "@/lib/labels";
 import type { Campaign } from "@/types";
@@ -19,6 +22,9 @@ const STATUS_STYLE: Record<string, string> = {
 };
 
 export default function CampaignsPage() {
+  const searchParams = useSearchParams();
+  const justCreated = searchParams.get("created") === "1";
+
   const { data: campaigns, isLoading } = useQuery<Campaign[]>({
     queryKey: ["campaigns"],
     queryFn: () => api.get("/campaigns").then((r) => r.data),
@@ -30,11 +36,25 @@ export default function CampaignsPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-2xl font-bold">Campanhas</h2>
-        <p className="text-gray-400 text-sm mt-1">
-          {campaigns?.length ?? 0} campanhas encontradas na sua conta do Meta Ads
-        </p>
+      {justCreated && (
+        <div className="bg-green-500/10 border border-green-500/30 rounded-xl p-4 text-sm text-green-300 flex items-center gap-3">
+          ✅ <span>Campanha criada com sucesso! Ela está <strong>pausada</strong> — ative quando quiser no Meta Ads Manager.</span>
+        </div>
+      )}
+
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-2xl font-bold">Campanhas</h2>
+          <p className="text-gray-400 text-sm mt-1">
+            {campaigns?.length ?? 0} campanhas encontradas na sua conta do Meta Ads
+          </p>
+        </div>
+        <Link
+          href="/campaigns/new"
+          className="flex items-center gap-2 btn-primary"
+        >
+          <Plus size={16} /> Nova Campanha
+        </Link>
       </div>
 
       {/* Summary cards */}
