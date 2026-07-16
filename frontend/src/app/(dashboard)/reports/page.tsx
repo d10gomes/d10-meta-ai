@@ -9,11 +9,21 @@ import {
   CartesianGrid, Tooltip, ResponsiveContainer, Legend,
 } from "recharts";
 
+const PERIODS = [
+  { label: "Hoje",    days: 1  },
+  { label: "Ontem",   days: 2  },
+  { label: "7 dias",  days: 7  },
+  { label: "14 dias", days: 14 },
+  { label: "30 dias", days: 30 },
+  { label: "3 meses", days: 90 },
+] as const;
+
 const PERIOD_LABELS: Record<number, string> = {
+  1:  "hoje",
+  2:  "ontem",
   7:  "últimos 7 dias",
   14: "últimos 14 dias",
   30: "último mês",
-  60: "últimos 2 meses",
   90: "últimos 3 meses",
 };
 
@@ -99,18 +109,18 @@ export default function ReportsPage() {
           <h2 className="text-2xl font-bold">Relatórios</h2>
           <p className="text-gray-400 text-sm mt-1">Análise de performance das suas campanhas</p>
         </div>
-        <div className="flex gap-2">
-          {[7, 14, 30, 60, 90].map((d) => (
+        <div className="flex gap-1 bg-surface-card border border-surface-border rounded-xl p-1">
+          {PERIODS.map((p) => (
             <button
-              key={d}
-              onClick={() => setDays(d)}
-              className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
-                days === d
-                  ? "bg-brand-500 text-white"
-                  : "bg-surface-card text-gray-400 hover:text-white border border-surface-border"
+              key={p.days}
+              onClick={() => setDays(p.days)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                days === p.days
+                  ? "bg-brand-500 text-white shadow"
+                  : "text-gray-400 hover:text-white"
               }`}
             >
-              {d}d
+              {p.label}
             </button>
           ))}
         </div>
