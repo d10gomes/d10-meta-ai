@@ -1,503 +1,356 @@
 "use client";
+import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { api } from "@/lib/api";
+import { translateObjective } from "@/lib/labels";
 
-import { useRef, useState, useCallback } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import {
-  Upload, Image as ImageIcon, Film, Search,
-  Trash2, RefreshCw, ExternalLink, CheckCircle2, Clock, AlertCircle,
-  TrendingUp, Eye, Zap,
-} from "lucide-react";
-import { clsx } from "clsx";
-import { toast } from "sonner";
-import { useApi } from "@/hooks/useApi";
+// ── Períodos ──────────────────────────────────────────────────────────────────
 
-// ─── Types ──────────────────────────────────────────────────────────────────
+const PERIODS = [
+  { label: "Hoje",    days: 1  },
+  { label: "Ontem",   days: 2  },
+  { label: "7 dias",  days: 7  },
+  { label: "14 dias", days: 14 },
+  { label: "30 dias", days: 30 },
+  { label: "3 meses", days: 90 },
+] as const;
 
-interface MediaAsset {
+const SORT_OPTIONS = [
+  { value: "roas",        label: "ROAS" },
+  { value: "conversions", label: "Conversões" },
+  { value: "ctr",         label: "CTR" },
+  { value: "spend",       label: "Gasto" },
+  { value: "cpa",         label: "Menor CPA" },
+] as const;
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+interface Creative {
   id: string;
+  meta_ad_id: string;
   name: string;
-  original_name: string;
-  file_type: "image" | "video" | "gif";
-  format: "feed" | "story" | "reels" | "carousel" | "unknown";
-  mime_type: string;
-  file_size_mb: number;
-  width_px?: number;
-  height_px?: number;
-  duration_secs?: number;
-  public_url: string;
-  meta_image_hash?: string;
-  meta_video_id?: string;
-  meta_status?: string;
-  meta_synced_at?: string;
-  offer_id?: string;
-  tags: string[];
-  notes?: string;
-  avg_ctr?: number;
-  avg_roas?: number;
-  avg_cpa?: number;
-  avg_frequency?: number;
-  times_used: number;
-  performance_score?: number;
-  status: "uploading" | "ready" | "synced_meta" | "error" | "deleted";
-  created_at: string;
+  status: string;
+  campaign_name: string;
+  adset_name: string;
+  objective: string;
+  spend: number;
+  impressions: number;
+  clicks: number;
+  conversions: number;
+  revenue: number;
+  ctr: number;
+  cpa: number;
+  roas: number;
+  frequency: number;
+  cpm: number;
+  days_with_data: number;
+  score: number;
+  grade: "S" | "A" | "B" | "C" | "D";
 }
 
-interface Stats {
-  total: number;
-  images: number;
-  videos: number;
-  synced_meta: number;
-  total_gb: number;
+interface CreativesResponse {
+  period_days: number;
+  total_ads: number;
+  total_spend: number;
+  total_conversions: number;
+  total_revenue: number;
+  avg_roas: number;
+  winners_count: number;
+  losers_count: number;
+  items: Creative[];
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
-const FORMAT_LABELS: Record<string, string> = {
-  feed: "Feed",
-  story: "Stories",
-  reels: "Reels",
-  carousel: "Carrossel",
-  unknown: "—",
+const fmtBRL = (n: number) =>
+  new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL", maximumFractionDigits: 0 }).format(n);
+
+const fmtNum = (n: number) => new Intl.NumberFormat("pt-BR").format(n);
+
+const GRADE_CONFIG: Record<string, { label: string; bg: string; text: string; desc: string }> = {
+  S: { label: "S", bg: "bg-purple-500/20", text: "text-purple-300", desc: "Excepcional — escalar agora" },
+  A: { label: "A", bg: "bg-green-500/15",  text: "text-green-400",  desc: "Vencedor — manter e escalar" },
+  B: { label: "B", bg: "bg-blue-500/15",   text: "text-blue-400",   desc: "Bom — monitorar" },
+  C: { label: "C", bg: "bg-yellow-500/15", text: "text-yellow-400", desc: "Regular — testar melhorias" },
+  D: { label: "D", bg: "bg-red-500/15",    text: "text-red-400",    desc: "Fraco — considerar pausar" },
 };
 
-const STATUS_CONFIG: Record<string, { label: string; icon: typeof CheckCircle2; color: string }> = {
-  ready: { label: "Pronto", icon: CheckCircle2, color: "text-emerald-400" },
-  synced_meta: { label: "No Meta", icon: CheckCircle2, color: "text-brand-400" },
-  uploading: { label: "Enviando", icon: Clock, color: "text-yellow-400" },
-  error: { label: "Erro", icon: AlertCircle, color: "text-red-400" },
-  deleted: { label: "Deletado", icon: Trash2, color: "text-gray-500" },
+const STATUS_DOT: Record<string, string> = {
+  ACTIVE:   "bg-green-400",
+  PAUSED:   "bg-gray-400",
+  DELETED:  "bg-red-400",
+  ARCHIVED: "bg-gray-600",
 };
 
-function scoreColor(score?: number) {
-  if (!score) return "text-gray-500";
-  if (score >= 7) return "text-emerald-400";
-  if (score >= 4) return "text-yellow-400";
-  return "text-red-400";
-}
-
-// ─── Upload Zone ─────────────────────────────────────────────────────────────
-
-function UploadZone({ onFiles }: { onFiles: (files: File[]) => void }) {
-  const [dragging, setDragging] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  const handle = useCallback(
-    (files: FileList | null) => {
-      if (!files) return;
-      const valid = Array.from(files).filter((f) =>
-        /^(image\/(jpeg|png|gif|webp)|video\/(mp4|quicktime|webm))$/.test(f.type)
-      );
-      if (valid.length) onFiles(valid);
-    },
-    [onFiles]
-  );
-
+function GradeBadge({ grade }: { grade: string }) {
+  const cfg = GRADE_CONFIG[grade] ?? GRADE_CONFIG.C;
   return (
-    <div
-      onDragOver={(e) => {
-        e.preventDefault();
-        setDragging(true);
-      }}
-      onDragLeave={() => setDragging(false)}
-      onDrop={(e) => {
-        e.preventDefault();
-        setDragging(false);
-        handle(e.dataTransfer.files);
-      }}
-      onClick={() => inputRef.current?.click()}
-      className={clsx(
-        "border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition-colors",
-        dragging
-          ? "border-brand-400 bg-brand-500/10"
-          : "border-surface-border hover:border-brand-500/50 hover:bg-surface-border/30"
-      )}
-    >
-      <Upload className="mx-auto mb-3 text-gray-500" size={32} />
-      <p className="text-sm text-gray-400">
-        Arraste imagens e vídeos aqui ou{" "}
-        <span className="text-brand-400 font-medium">clique para selecionar</span>
-      </p>
-      <p className="text-xs text-gray-600 mt-1">
-        JPG, PNG, GIF, WebP, MP4, MOV · Imagens até 30 MB · Vídeos até 500 MB
-      </p>
-      <input
-        ref={inputRef}
-        type="file"
-        multiple
-        accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/quicktime,video/webm"
-        className="hidden"
-        onChange={(e) => handle(e.target.files)}
-      />
-    </div>
+    <span className={`inline-flex items-center justify-center w-7 h-7 rounded-lg text-xs font-bold ${cfg.bg} ${cfg.text}`}>
+      {cfg.label}
+    </span>
   );
 }
 
-// ─── Asset Card ──────────────────────────────────────────────────────────────
+function RoasBadge({ roas }: { roas: number }) {
+  const color = roas >= 4 ? "text-purple-300" : roas >= 3 ? "text-green-400" : roas >= 2 ? "text-blue-400" : roas >= 1 ? "text-yellow-400" : "text-red-400";
+  return <span className={`text-xs font-bold ${color}`}>{roas > 0 ? `${roas.toFixed(2)}x` : "—"}</span>;
+}
 
-function AssetCard({
-  asset,
-  onDelete,
-  onSyncMeta,
-}: {
-  asset: MediaAsset;
-  onDelete: (id: string) => void;
-  onSyncMeta: (id: string) => void;
-}) {
-  const [hover, setHover] = useState(false);
-  const statusCfg = STATUS_CONFIG[asset.status] ?? STATUS_CONFIG.error;
-  const StatusIcon = statusCfg.icon;
+// ── Top 3 cards ───────────────────────────────────────────────────────────────
+
+function TopCard({ rank, creative, metric }: { rank: number; creative: Creative; metric: string }) {
+  const medals = ["🥇", "🥈", "🥉"];
+  const val =
+    metric === "roas"        ? `${creative.roas.toFixed(2)}x ROAS` :
+    metric === "conversions" ? `${fmtNum(creative.conversions)} conversões` :
+    metric === "ctr"         ? `${creative.ctr.toFixed(2)}% CTR` :
+    metric === "spend"       ? fmtBRL(creative.spend) :
+    creative.cpa > 0         ? `${fmtBRL(creative.cpa)} CPA` : "—";
 
   return (
-    <div
-      className="bg-surface-card border border-surface-border rounded-xl overflow-hidden"
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-    >
-      {/* Thumbnail */}
-      <div className="relative bg-gray-900 aspect-video flex items-center justify-center overflow-hidden">
-        {asset.file_type === "video" ? (
-          <div className="flex flex-col items-center gap-2 text-gray-600">
-            <Film size={36} />
-            {asset.duration_secs && (
-              <span className="text-xs text-gray-500">{Math.round(asset.duration_secs)}s</span>
-            )}
-          </div>
-        ) : (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            src={asset.public_url}
-            alt={asset.name}
-            className="w-full h-full object-cover"
-            onError={(e) => {
-              (e.target as HTMLImageElement).style.display = "none";
-            }}
-          />
-        )}
-
-        {/* Hover overlay */}
-        {hover && (
-          <div className="absolute inset-0 bg-black/60 flex items-center justify-center gap-2">
-            <a
-              href={asset.public_url}
-              target="_blank"
-              rel="noopener noreferrer"
-              onClick={(e) => e.stopPropagation()}
-              className="p-2 bg-white/10 rounded-lg hover:bg-white/20 text-white"
-            >
-              <ExternalLink size={16} />
-            </a>
-            {asset.status === "ready" && (
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onSyncMeta(asset.id);
-                }}
-                className="p-2 bg-white/10 rounded-lg hover:bg-white/20 text-white"
-                title="Sincronizar com Meta"
-              >
-                <RefreshCw size={16} />
-              </button>
-            )}
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                onDelete(asset.id);
-              }}
-              className="p-2 bg-red-500/20 rounded-lg hover:bg-red-500/40 text-red-400"
-            >
-              <Trash2 size={16} />
-            </button>
-          </div>
-        )}
-
-        {/* Badges */}
-        <span className="absolute top-2 left-2 text-[10px] bg-black/60 text-gray-300 px-1.5 py-0.5 rounded font-mono">
-          {FORMAT_LABELS[asset.format] ?? asset.format}
-        </span>
-        <span className="absolute top-2 right-2">
-          {asset.file_type === "video" ? (
-            <Film size={14} className="text-brand-400" />
-          ) : (
-            <ImageIcon size={14} className="text-gray-400" />
-          )}
-        </span>
-      </div>
-
-      {/* Info */}
-      <div className="p-3 space-y-2">
-        <p className="text-sm font-medium text-white truncate" title={asset.name}>
-          {asset.name}
-        </p>
-
-        <div className="flex items-center justify-between">
-          <div className={clsx("flex items-center gap-1 text-xs", statusCfg.color)}>
-            <StatusIcon size={11} />
-            {statusCfg.label}
-          </div>
-          <span className="text-xs text-gray-600">{asset.file_size_mb} MB</span>
+    <div className={`card border ${rank === 0 ? "border-yellow-500/30 bg-yellow-500/5" : "border-surface-border"} space-y-3`}>
+      <div className="flex items-start gap-3">
+        <span className="text-2xl">{medals[rank]}</span>
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-semibold text-white truncate" title={creative.name}>{creative.name}</p>
+          <p className="text-xs text-gray-500 truncate mt-0.5">{creative.campaign_name}</p>
         </div>
-
-        {/* Metrics row */}
-        {(asset.avg_ctr != null || asset.avg_roas != null || asset.performance_score != null) && (
-          <div className="flex gap-3 pt-1 border-t border-surface-border">
-            {asset.avg_ctr != null && (
-              <div className="flex items-center gap-1 text-xs text-gray-400">
-                <Eye size={10} />
-                {(asset.avg_ctr * 100).toFixed(1)}%
-              </div>
-            )}
-            {asset.avg_roas != null && (
-              <div className="flex items-center gap-1 text-xs text-gray-400">
-                <TrendingUp size={10} />
-                {asset.avg_roas.toFixed(1)}x
-              </div>
-            )}
-            {asset.performance_score != null && (
-              <div
-                className={clsx(
-                  "flex items-center gap-1 text-xs ml-auto font-mono",
-                  scoreColor(asset.performance_score)
-                )}
-              >
-                <Zap size={10} />
-                {asset.performance_score.toFixed(1)}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Tags */}
-        {asset.tags.length > 0 && (
-          <div className="flex flex-wrap gap-1">
-            {asset.tags.slice(0, 3).map((t) => (
-              <span
-                key={t}
-                className="text-[10px] bg-surface-border text-gray-400 px-1.5 py-0.5 rounded-full"
-              >
-                {t}
-              </span>
-            ))}
-          </div>
-        )}
+        <GradeBadge grade={creative.grade} />
+      </div>
+      <div className="text-lg font-bold text-white">{val}</div>
+      <div className="grid grid-cols-3 gap-2 text-xs text-gray-400">
+        <div>
+          <p className="text-gray-600">Gasto</p>
+          <p className="text-white font-medium">{fmtBRL(creative.spend)}</p>
+        </div>
+        <div>
+          <p className="text-gray-600">Conversões</p>
+          <p className="text-white font-medium">{fmtNum(creative.conversions)}</p>
+        </div>
+        <div>
+          <p className="text-gray-600">CTR</p>
+          <p className="text-white font-medium">{creative.ctr.toFixed(2)}%</p>
+        </div>
       </div>
     </div>
   );
 }
 
-// ─── Main Page ────────────────────────────────────────────────────────────────
+// ── Página ────────────────────────────────────────────────────────────────────
 
 export default function CreativesPage() {
-  const api = useApi();
-  const qc = useQueryClient();
-
+  const [period, setPeriod] = useState(PERIODS[2]);
+  const [sort, setSort]     = useState<string>("roas");
   const [search, setSearch] = useState("");
-  const [typeFilter, setTypeFilter] = useState("");
-  const [formatFilter, setFormatFilter] = useState("");
-  const [sort, setSort] = useState("created_at");
-  const [uploading, setUploading] = useState<string[]>([]);
+  const [gradeFilter, setGradeFilter] = useState<string>("");
+  const [view, setView]     = useState<"table" | "grid">("table");
 
-  const statsQ = useQuery<Stats>({
-    queryKey: ["media-stats"],
-    queryFn: () => api.get("/media/stats").then((r) => r.data),
-    refetchInterval: 30_000,
+  const { data, isLoading } = useQuery<CreativesResponse>({
+    queryKey: ["creatives", period.days, sort],
+    queryFn: () => api.get(`/creatives?days=${period.days}&sort=${sort}&limit=200`).then((r) => r.data),
   });
 
-  const listQ = useQuery<{ total: number; items: MediaAsset[] }>({
-    queryKey: ["media-list", search, typeFilter, formatFilter, sort],
-    queryFn: () =>
-      api
-        .get("/media", {
-          params: {
-            search: search || undefined,
-            file_type: typeFilter || undefined,
-            format: formatFilter || undefined,
-            sort,
-            limit: 100,
-          },
-        })
-        .then((r) => r.data),
-    refetchInterval: 15_000,
+  const filtered = (data?.items ?? []).filter((c) => {
+    const matchSearch = !search || c.name.toLowerCase().includes(search.toLowerCase()) || c.campaign_name.toLowerCase().includes(search.toLowerCase());
+    const matchGrade  = !gradeFilter || c.grade === gradeFilter;
+    return matchSearch && matchGrade;
   });
 
-  const deleteMut = useMutation({
-    mutationFn: (id: string) => api.delete(`/media/${id}`),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["media-list"] });
-      qc.invalidateQueries({ queryKey: ["media-stats"] });
-      toast.success("Mídia removida.");
-    },
-  });
-
-  const syncMut = useMutation({
-    mutationFn: ({ id, accountId }: { id: string; accountId: string }) =>
-      api.post(`/media/${id}/sync-meta?meta_account_id=${accountId}`),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["media-list"] });
-      toast.success("Sincronizado com o Meta.");
-    },
-    onError: () => toast.error("Erro ao sincronizar com o Meta."),
-  });
-
-  const handleFiles = async (files: File[]) => {
-    for (const file of files) {
-      setUploading((prev) => [...prev, file.name]);
-      try {
-        const fd = new FormData();
-        fd.append("file", file);
-        await api.post("/media/upload", fd, {
-          headers: { "Content-Type": "multipart/form-data" },
-        });
-        qc.invalidateQueries({ queryKey: ["media-list"] });
-        qc.invalidateQueries({ queryKey: ["media-stats"] });
-        toast.success(`"${file.name}" enviado!`);
-      } catch {
-        toast.error(`Erro ao enviar "${file.name}".`);
-      } finally {
-        setUploading((prev) => prev.filter((n) => n !== file.name));
-      }
-    }
-  };
-
-  const assets = listQ.data?.items ?? [];
-  const stats = statsQ.data;
+  const top3 = (data?.items ?? []).slice(0, 3);
 
   return (
-    <div className="p-6 space-y-6">
-      {/* Header */}
-      <div>
-        <h1 className="text-2xl font-bold text-white">Biblioteca de Criativos</h1>
-        <p className="text-sm text-gray-400 mt-1">
-          Gerencie imagens e vídeos para seus anúncios no Meta
-        </p>
+    <div className="space-y-6">
+      {/* Header + período */}
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div>
+          <h2 className="text-2xl font-bold">Criativos</h2>
+          <p className="text-gray-400 text-sm mt-1">Desempenho de todos os anúncios ativos e pausados</p>
+        </div>
+        <div className="flex gap-1 bg-surface-card border border-surface-border rounded-xl p-1">
+          {PERIODS.map((p) => (
+            <button
+              key={p.days}
+              onClick={() => setPeriod(p)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                period.days === p.days ? "bg-brand-500 text-white shadow" : "text-gray-400 hover:text-white"
+              }`}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
       </div>
 
-      {/* Stats */}
-      {stats && (
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+      {/* KPIs de resumo */}
+      {data && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3">
           {[
-            { label: "Total", value: stats.total },
-            { label: "Imagens", value: stats.images },
-            { label: "Vídeos", value: stats.videos },
-            { label: "No Meta", value: stats.synced_meta },
-            { label: "Armazenamento", value: `${stats.total_gb} GB` },
-          ].map(({ label, value }) => (
-            <div
-              key={label}
-              className="bg-surface-card border border-surface-border rounded-xl p-4 text-center"
-            >
-              <p className="text-xl font-bold text-white">{value}</p>
+            { label: "Anúncios",      value: data.total_ads },
+            { label: "Gasto total",   value: fmtBRL(data.total_spend) },
+            { label: "Receita",       value: fmtBRL(data.total_revenue) },
+            { label: "ROAS médio",    value: `${data.avg_roas.toFixed(2)}x`, color: data.avg_roas >= 2 ? "text-green-400" : "text-red-400" },
+            { label: "Conversões",    value: fmtNum(data.total_conversions) },
+            { label: "🏆 Vencedores", value: data.winners_count, color: "text-green-400" },
+            { label: "⚠️ Fracos",    value: data.losers_count,  color: data.losers_count > 0 ? "text-red-400" : "text-gray-400" },
+          ].map(({ label, value, color }) => (
+            <div key={label} className="card text-center py-3">
+              <p className={`text-xl font-bold ${color ?? "text-white"}`}>{value}</p>
               <p className="text-xs text-gray-500 mt-0.5">{label}</p>
             </div>
           ))}
         </div>
       )}
 
-      {/* Upload */}
-      <UploadZone onFiles={handleFiles} />
-
-      {/* Upload progress */}
-      {uploading.length > 0 && (
-        <div className="flex flex-wrap gap-2">
-          {uploading.map((name) => (
-            <div
-              key={name}
-              className="flex items-center gap-2 bg-brand-500/10 border border-brand-500/20 rounded-full px-3 py-1.5 text-xs text-brand-400"
-            >
-              <RefreshCw size={11} className="animate-spin" />
-              {name}
-            </div>
-          ))}
+      {/* Top 3 vencedores */}
+      {top3.length > 0 && (
+        <div>
+          <div className="flex items-center gap-2 mb-3">
+            <h3 className="text-base font-semibold">Top 3 — melhores resultados</h3>
+            <span className="text-xs text-gray-500">ordenado por {SORT_OPTIONS.find((s) => s.value === sort)?.label}</span>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            {top3.map((c, i) => (
+              <TopCard key={c.id} rank={i} creative={c} metric={sort} />
+            ))}
+          </div>
         </div>
       )}
 
-      {/* Filters */}
-      <div className="flex flex-wrap gap-3">
-        <div className="relative flex-1 min-w-48">
-          <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Buscar criativos..."
-            className="w-full pl-9 pr-4 py-2 bg-surface-card border border-surface-border rounded-lg text-sm text-white placeholder-gray-600 focus:outline-none focus:border-brand-500"
-          />
+      {/* Filtros + ordenação */}
+      <div className="flex gap-3 flex-wrap items-center">
+        <input
+          type="text"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Buscar anúncio ou campanha..."
+          className="flex-1 min-w-[180px] bg-surface border border-surface-border rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-brand-500"
+        />
+
+        {/* Grade filter */}
+        <div className="flex gap-1">
+          {["", "S", "A", "B", "C", "D"].map((g) => {
+            const cfg = g ? GRADE_CONFIG[g] : null;
+            return (
+              <button
+                key={g || "all"}
+                onClick={() => setGradeFilter(g)}
+                className={`px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-all ${
+                  gradeFilter === g
+                    ? "border-brand-500 text-white bg-brand-500/20"
+                    : "border-surface-border text-gray-400 hover:text-white"
+                } ${cfg ? `${cfg.bg} ${cfg.text}` : ""}`}
+              >
+                {g || "Todos"}
+              </button>
+            );
+          })}
         </div>
 
-        <select
-          value={typeFilter}
-          onChange={(e) => setTypeFilter(e.target.value)}
-          className="bg-surface-card border border-surface-border rounded-lg px-3 py-2 text-sm text-gray-400 focus:outline-none focus:border-brand-500"
-        >
-          <option value="">Todos os tipos</option>
-          <option value="image">Imagens</option>
-          <option value="video">Vídeos</option>
-          <option value="gif">GIFs</option>
-        </select>
-
-        <select
-          value={formatFilter}
-          onChange={(e) => setFormatFilter(e.target.value)}
-          className="bg-surface-card border border-surface-border rounded-lg px-3 py-2 text-sm text-gray-400 focus:outline-none focus:border-brand-500"
-        >
-          <option value="">Todos os formatos</option>
-          <option value="feed">Feed</option>
-          <option value="story">Stories</option>
-          <option value="reels">Reels</option>
-          <option value="carousel">Carrossel</option>
-        </select>
-
+        {/* Ordenação */}
         <select
           value={sort}
           onChange={(e) => setSort(e.target.value)}
-          className="bg-surface-card border border-surface-border rounded-lg px-3 py-2 text-sm text-gray-400 focus:outline-none focus:border-brand-500"
+          className="bg-surface-card border border-surface-border rounded-lg px-3 py-2 text-sm text-gray-300 focus:outline-none"
         >
-          <option value="created_at">Mais recentes</option>
-          <option value="avg_ctr">Maior CTR</option>
-          <option value="avg_roas">Maior ROAS</option>
-          <option value="times_used">Mais usados</option>
+          {SORT_OPTIONS.map((o) => (
+            <option key={o.value} value={o.value}>Ordenar por {o.label}</option>
+          ))}
         </select>
+
+        <span className="text-xs text-gray-500">{filtered.length} criativos</span>
       </div>
 
-      {/* Grid */}
-      {listQ.isLoading ? (
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
-          {Array.from({ length: 10 }).map((_, i) => (
-            <div
-              key={i}
-              className="bg-surface-card border border-surface-border rounded-xl overflow-hidden animate-pulse"
-            >
-              <div className="bg-gray-800 aspect-video" />
-              <div className="p-3 space-y-2">
-                <div className="h-3 bg-gray-800 rounded w-3/4" />
-                <div className="h-2 bg-gray-800 rounded w-1/2" />
-              </div>
+      {/* Tabela de criativos */}
+      {isLoading ? (
+        <div className="card text-center py-12 text-gray-500 text-sm">Carregando criativos...</div>
+      ) : filtered.length === 0 ? (
+        <div className="card text-center py-12 text-gray-500 text-sm">
+          Nenhum criativo com dados no período selecionado.
+          <p className="text-xs mt-1 text-gray-600">O Scanner precisa ter coletado dados para este período.</p>
+        </div>
+      ) : (
+        <div className="card overflow-x-auto">
+          <table className="w-full text-sm min-w-[900px]">
+            <thead>
+              <tr className="text-gray-500 border-b border-surface-border text-left text-xs uppercase tracking-wider">
+                <th className="pb-3 pr-3 w-8">#</th>
+                <th className="pb-3 pr-3">Grade</th>
+                <th className="pb-3 pr-3">Anúncio / Campanha</th>
+                <th className="pb-3 pr-3">Status</th>
+                <th className="pb-3 pr-3 text-right">Gasto</th>
+                <th className="pb-3 pr-3 text-right">ROAS</th>
+                <th className="pb-3 pr-3 text-right">Conversões</th>
+                <th className="pb-3 pr-3 text-right">CTR</th>
+                <th className="pb-3 pr-3 text-right">CPA</th>
+                <th className="pb-3 pr-3 text-right">Freq.</th>
+                <th className="pb-3 text-right">Dias</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((c, i) => (
+                <tr
+                  key={c.id}
+                  className="border-b border-surface-border last:border-0 hover:bg-surface-border/20 transition-colors"
+                >
+                  <td className="py-3 pr-3 text-gray-600 text-xs">{i + 1}</td>
+                  <td className="py-3 pr-3">
+                    <div title={GRADE_CONFIG[c.grade]?.desc}>
+                      <GradeBadge grade={c.grade} />
+                    </div>
+                  </td>
+                  <td className="py-3 pr-3 max-w-[260px]">
+                    <p className="text-white text-sm font-medium truncate" title={c.name}>{c.name}</p>
+                    <p className="text-gray-500 text-xs truncate mt-0.5" title={c.campaign_name}>
+                      {c.campaign_name}
+                    </p>
+                  </td>
+                  <td className="py-3 pr-3">
+                    <span className="flex items-center gap-1.5 text-xs text-gray-400">
+                      <span className={`w-1.5 h-1.5 rounded-full ${STATUS_DOT[c.status] ?? "bg-gray-500"}`} />
+                      {c.status === "ACTIVE" ? "Ativo" : c.status === "PAUSED" ? "Pausado" : c.status}
+                    </span>
+                  </td>
+                  <td className="py-3 pr-3 text-right text-gray-300 text-xs font-mono">{fmtBRL(c.spend)}</td>
+                  <td className="py-3 pr-3 text-right"><RoasBadge roas={c.roas} /></td>
+                  <td className="py-3 pr-3 text-right">
+                    <span className={`text-xs font-semibold ${c.conversions > 0 ? "text-green-400" : "text-gray-600"}`}>
+                      {c.conversions > 0 ? fmtNum(c.conversions) : "—"}
+                    </span>
+                  </td>
+                  <td className="py-3 pr-3 text-right text-xs text-gray-300 font-mono">
+                    {c.ctr > 0 ? `${c.ctr.toFixed(2)}%` : "—"}
+                  </td>
+                  <td className="py-3 pr-3 text-right text-xs text-gray-300 font-mono">
+                    {c.cpa > 0 ? fmtBRL(c.cpa) : "—"}
+                  </td>
+                  <td className="py-3 pr-3 text-right">
+                    <span className={`text-xs ${c.frequency > 4 ? "text-red-400 font-semibold" : c.frequency > 2.5 ? "text-yellow-400" : "text-gray-400"}`}>
+                      {c.frequency > 0 ? `${c.frequency.toFixed(1)}x` : "—"}
+                    </span>
+                  </td>
+                  <td className="py-3 text-right text-xs text-gray-600">{c.days_with_data}d</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Legenda grades */}
+      <div className="card">
+        <p className="text-xs font-semibold text-gray-400 mb-3">Legenda de classificação</p>
+        <div className="flex flex-wrap gap-4">
+          {Object.entries(GRADE_CONFIG).map(([g, cfg]) => (
+            <div key={g} className="flex items-center gap-2">
+              <GradeBadge grade={g} />
+              <span className="text-xs text-gray-400">{cfg.desc}</span>
             </div>
           ))}
         </div>
-      ) : assets.length === 0 ? (
-        <div className="text-center py-20 text-gray-500">
-          <ImageIcon size={48} className="mx-auto mb-4 opacity-30" />
-          <p className="text-sm">Nenhum criativo encontrado.</p>
-          <p className="text-xs mt-1">Faça upload de imagens ou vídeos acima.</p>
-        </div>
-      ) : (
-        <>
-          <p className="text-xs text-gray-500">{listQ.data?.total ?? 0} criativos</p>
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
-            {assets.map((asset) => (
-              <AssetCard
-                key={asset.id}
-                asset={asset}
-                onDelete={(id) => {
-                  if (confirm("Remover este criativo da biblioteca?")) {
-                    deleteMut.mutate(id);
-                  }
-                }}
-                onSyncMeta={(id) => syncMut.mutate({ id, accountId: "" })}
-              />
-            ))}
-          </div>
-        </>
-      )}
+        <p className="text-xs text-gray-600 mt-3">
+          💡 Frequência acima de 4x indica público saturado — hora de renovar o criativo.
+        </p>
+      </div>
     </div>
   );
 }
