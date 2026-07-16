@@ -65,10 +65,37 @@ Na última análise ({past_analyses[0]['created_at'][:10]}):
 - Principais problemas: {', '.join(last.get('top_issues', []))}
 """
 
-        # 4. Chamar Claude para análise real
+        # 4. Contexto de sazonalidade
+        now = datetime.utcnow()
+        weekday_pt = ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"][now.weekday()]
+        is_weekend = now.weekday() >= 5
+        season_context = (
+            f"Hoje é {weekday_pt}, {now.strftime('%d/%m/%Y')} às {now.hour:02d}h UTC. "
+            + ("FIM DE SEMANA: historicamente CPL sobe 15-25% mas volume de cadastros é maior. "
+               "Não compare com métricas de dias úteis sem ajuste." if is_weekend
+               else "DIA ÚTIL: comparação direta com histórico de dias úteis é válida.")
+        )
+
+        # Verificar se essa semana tem padrão diferente das anteriores (possível sazonalidade)
+        seasonality_note = ""
+        if kpis_7d.get("total_spend", 0) > 0 and kpis_30d.get("total_spend", 0) > 0:
+            avg_daily_7d = kpis_7d["total_spend"] / 7
+            avg_daily_30d = kpis_30d["total_spend"] / 30
+            variation = ((avg_daily_7d - avg_daily_30d) / avg_daily_30d * 100) if avg_daily_30d > 0 else 0
+            if abs(variation) > 20:
+                direction = "acima" if variation > 0 else "abaixo"
+                seasonality_note = (
+                    f"⚠️ VARIAÇÃO SAZONAL: gasto médio diário desta semana está "
+                    f"{abs(variation):.0f}% {direction} da média dos últimos 30 dias. "
+                    f"Investigar causa (evento, feriado, mudança de estratégia)."
+                )
+
+        # 5. Chamar Claude para análise real
         if kpis_7d.get("total_spend", 0) > 0 or scanner_data:
             data_para_analise = {
                 "periodo": "últimos 7 dias",
+                "contexto_sazonalidade": season_context,
+                "alerta_sazonalidade": seasonality_note,
                 "kpis_7d": kpis_7d,
                 "kpis_30d": kpis_30d,
                 "top_5_campanhas": top_campaigns,
@@ -82,6 +109,8 @@ Na última análise ({past_analyses[0]['created_at'][:10]}):
                 user_message=f"""Analise esses dados de Meta Ads e forneça insights acionáveis:
 
 {json.dumps(data_para_analise, ensure_ascii=False, indent=2)}
+
+IMPORTANTE: considere o contexto de sazonalidade ao comparar métricas.
 
 Estruture sua resposta em:
 ## Situação Geral

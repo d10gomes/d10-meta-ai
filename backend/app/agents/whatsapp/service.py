@@ -86,7 +86,28 @@ Formato:
         if budget_data:
             context_parts.append(f"BUDGET: {budget_data[0]['summary'][:300]}")
 
-        # 4. Claude gera o relatório WhatsApp
+        # 4. Tentar ler dados do Performance Monitor para relatório por marca
+        monitor_data = await self.read_knowledge(
+            source_agent="performance_monitor", entry_type="raw_data", only_unread=False, limit=1
+        )
+        brand_section = ""
+        if monitor_data:
+            brands = monitor_data[0]["content"].get("brands", [])
+            if brands:
+                lines = ["\n📊 *Por Marca (7 dias):*"]
+                for b in sorted(brands, key=lambda x: -(x.get("spend_7d") or 0)):
+                    name = b.get("brand", "?")
+                    spend = b.get("spend_7d") or 0
+                    roas = b.get("roas")
+                    cpl = b.get("cpl")
+                    purchases = b.get("purchases") or 0
+                    signups = b.get("signups") or 0
+                    perf = f"ROAS {roas:.2f}x" if roas else (f"CPL R${cpl:.2f}" if cpl else "sem dados")
+                    conv = f"{purchases} compras" if purchases else (f"{signups} cadastros" if signups else "sem conv.")
+                    lines.append(f"  *{name}*: R${spend:,.0f} | {perf} | {conv}")
+                brand_section = "\n".join(lines)
+
+        # 5. Claude gera o relatório WhatsApp
         report_text = await self.ai_think(
             system_prompt=self.SYSTEM_PROMPT,
             user_message=f"""Gere um relatório WhatsApp conciso para hoje ({datetime.now().strftime('%d/%m/%Y %H:%M')}):
@@ -96,6 +117,10 @@ Formato:
 Escreva o relatório diretamente, pronto para envio.""",
             max_tokens=800,
         )
+
+        # Adiciona seção por marca ao final se disponível
+        if brand_section:
+            report_text = report_text.rstrip() + "\n" + brand_section
 
         # 5. Buscar destinatários (tenants com WhatsApp configurado)
         recipients = await self._get_recipients(tenant_id)
