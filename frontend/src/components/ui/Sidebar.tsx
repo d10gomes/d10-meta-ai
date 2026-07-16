@@ -3,7 +3,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   LayoutDashboard, Megaphone, Stethoscope, Zap, Palette,
-  BarChart3, Settings, LogOut, Bot, Brain, Activity,
+  BarChart3, Settings, LogOut, Bot, Brain, Activity, GitCompare,
 } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
 import { clsx } from "clsx";
@@ -17,6 +17,7 @@ const NAV = [
   { href: "/agents", label: "Agentes", icon: Bot },
   { href: "/diagnoses", label: "Diagnósticos", icon: Stethoscope },
   { href: "/creatives", label: "Criativos", icon: Palette },
+  { href: "/comparacao", label: "Comparação", icon: GitCompare },
   { href: "/reports", label: "Relatórios", icon: BarChart3 },
   { href: "/settings", label: "Configurações", icon: Settings },
 ];
