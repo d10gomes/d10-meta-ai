@@ -4,7 +4,7 @@ from app.api.v1.endpoints import (
     auth, tenants, meta_accounts, campaigns,
     diagnoses, actions, creatives, reports, agents,
 )
-from app.api.v1.endpoints import maestro, media, monitor
+from app.api.v1.endpoints import maestro, media, monitor, telegram_webhook
 
 api_router = APIRouter()
 
@@ -20,3 +20,4 @@ api_router.include_router(agents.router, prefix="/agents", tags=["agents"])
 api_router.include_router(maestro.router)
 api_router.include_router(media.router)
 api_router.include_router(monitor.router)
+api_router.include_router(telegram_webhook.router)

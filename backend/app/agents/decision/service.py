@@ -168,17 +168,49 @@ Tome decisões ponderadas considerando o histórico e as lições aprendidas. Re
         # Fallback: retorna estrutura mínima
         return [{"action": "MONITORAR", "target": "geral", "justification": raw[:200], "confidence": 0.5}]
 
+    # Ações que exigem aprovação humana antes de executar
+    _APPROVAL_REQUIRED = {
+        "PAUSAR_CAMPANHA", "PAUSAR_ADSET", "PAUSAR_AD",
+        "REDUZIR_BUDGET", "AUMENTAR_BUDGET", "AJUSTAR_BUDGET",
+        "SCALE_BUDGET_UP", "SCALE_BUDGET_DOWN",
+    }
+
     async def _create_action(self, tenant_id: str, dec: dict):
+        action_type = dec.get("action", "MONITORAR")
+        needs_approval = action_type in self._APPROVAL_REQUIRED
+
         action = AgentAction(
             tenant_id=tenant_id,
-            action_type=dec.get("action", "MONITORAR"),
+            action_type=action_type,
             entity_type="campaign",
             entity_id=dec.get("target_id"),
             payload=dec,
             status="pending",
+            requires_approval=needs_approval,
         )
         self._s.add(action)
         await self._s.flush()
+
+        if needs_approval:
+            await self._notify_telegram(tenant_id, str(action.id), dec)
+
+    async def _notify_telegram(self, tenant_id: str, action_id: str, dec: dict) -> None:
+        try:
+            from app.core.telegram import send_action_approval_request
+            await send_action_approval_request(
+                session=self._s,
+                tenant_id=tenant_id,
+                action_id=action_id,
+                action_type=dec.get("action", ""),
+                entity_name=dec.get("target", dec.get("target_id", "—")),
+                reason=dec.get("justification", "")[:200],
+                details={
+                    k: dec[k] for k in ("confidence", "new_budget", "old_budget")
+                    if k in dec
+                },
+            )
+        except Exception as exc:
+            logger.warning("decision.telegram_notify_failed", error=str(exc))
 
     async def record_outcome(self, decision_key: str, result: str, impact: dict):
         """Called by Executor to report back results of executed actions."""

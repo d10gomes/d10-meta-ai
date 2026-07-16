@@ -24,14 +24,19 @@ class ExecutorService(AgentBase):
 
     async def execute_pending(self, tenant_id: str):
         self._tenant_id = tenant_id
+        # Executa ações "pending" que não exigem aprovação
+        # e ações "approved" (aprovadas via Telegram) que exigem aprovação
         result = await self._session.execute(
             select(AgentAction).where(
                 AgentAction.tenant_id == tenant_id,
-                AgentAction.status == "pending",
+                AgentAction.status.in_(["pending", "approved"]),
             ).limit(50)
         )
         actions = list(result.scalars().all())
         for action in actions:
+            # Ações que precisam de aprovação só executam quando status="approved"
+            if action.requires_approval and action.status == "pending":
+                continue
             await self.execute(str(action.id))
 
     async def execute(self, action_id: str):
