@@ -403,6 +403,76 @@ async def get_campaign_detail(
     }
 
 
+class DuplicateRequest(BaseModel):
+    new_name: str
+
+    @field_validator("new_name")
+    @classmethod
+    def name_not_empty(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Nome é obrigatório")
+        return v
+
+
+@router.post("/{campaign_id}/duplicate")
+async def duplicate_campaign_endpoint(
+    campaign_id: str,
+    body: DuplicateRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Duplica uma campanha no Meta (deep copy: inclui adsets e ads).
+    A cópia é criada PAUSED com o novo nome informado.
+    """
+    result = await db.execute(
+        select(Campaign, MetaAccount)
+        .join(MetaAccount, Campaign.meta_account_id == MetaAccount.id)
+        .where(Campaign.id == campaign_id, MetaAccount.tenant_id == current_user.tenant_id)
+    )
+    row = result.one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Campanha não encontrada")
+
+    campaign, account = row
+    client = MetaAdsClient(account.access_token, account.ad_account_id)
+
+    try:
+        # 1. Duplica no Meta
+        copy_result = await client.duplicate_campaign(campaign.meta_campaign_id)
+        new_meta_id = copy_result.get("copied_campaign_id")
+        if not new_meta_id:
+            raise HTTPException(status_code=400, detail="Meta não retornou ID da campanha copiada")
+
+        # 2. Renomeia para o nome escolhido
+        await client.rename_campaign(new_meta_id, body.new_name)
+
+        logger.info("campaign.duplicated",
+                    original_id=campaign_id, new_meta_id=new_meta_id, new_name=body.new_name)
+
+        # 3. Sincroniza nova campanha no banco via Scanner
+        try:
+            from app.agents.scanner.service import ScannerService
+            scanner = ScannerService(db)
+            await scanner.run(str(current_user.tenant_id))
+            await db.commit()
+        except Exception as scan_exc:
+            logger.warning("campaign.duplicate_scanner_failed", error=str(scan_exc))
+
+        return {
+            "ok": True,
+            "new_meta_campaign_id": new_meta_id,
+            "new_name": body.new_name,
+            "message": f"Campanha '{body.new_name}' criada com sucesso e pausada.",
+        }
+
+    except MetaAPIError as exc:
+        raise HTTPException(status_code=400, detail=translate_meta_error(str(exc)))
+    finally:
+        await client.close()
+
+
 class BudgetUpdateRequest(BaseModel):
     daily_budget_brl: float
 

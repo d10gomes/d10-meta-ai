@@ -189,7 +189,21 @@ class MetaAdsClient:
             params={"access_token": self.access_token},
             json={"deep_copy": True, "status_option": "PAUSED"},
         )
-        return resp.json()
+        data = resp.json()
+        if "error" in data:
+            raise MetaAPIError(data["error"].get("message", "Erro ao duplicar campanha"))
+        return data
+
+    async def rename_campaign(self, campaign_id: str, name: str) -> Dict:
+        resp = await self._http.post(
+            f"{BASE_URL}/{campaign_id}",
+            params={"access_token": self.access_token},
+            json={"name": name},
+        )
+        data = resp.json()
+        if "error" in data:
+            raise MetaAPIError(data["error"].get("message", "Erro ao renomear campanha"))
+        return data
 
     # ── Creative Library ───────────────────────────────────────────────────────
 

@@ -3,10 +3,11 @@ import { Suspense, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { Plus, Search, Play, Pause, Loader2 } from "lucide-react";
+import { Plus, Search, Play, Pause, Loader2, Copy, X } from "lucide-react";
 import { api } from "@/lib/api";
 import { translateObjective, translateStatus, formatBudget } from "@/lib/labels";
 import type { Campaign } from "@/types";
+import { toast } from "sonner";
 
 type CampaignWithMetrics = Campaign & {
   spend_7d?: number | null;
@@ -49,6 +50,8 @@ function CampaignsInner() {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<"ALL" | "ACTIVE" | "PAUSED">("ALL");
   const [togglingId, setTogglingId] = useState<string | null>(null);
+  const [duplicating, setDuplicating] = useState<{ id: string; name: string } | null>(null);
+  const [dupName, setDupName] = useState("");
 
   const { data: campaigns, isLoading } = useQuery<CampaignWithMetrics[]>({
     queryKey: ["campaigns"],
@@ -64,6 +67,28 @@ function CampaignsInner() {
       qc.invalidateQueries({ queryKey: ["campaigns"] });
     },
   });
+
+  const dupMutation = useMutation({
+    mutationFn: ({ id, new_name }: { id: string; new_name: string }) =>
+      api.post(`/campaigns/${id}/duplicate`, { new_name }).then((r) => r.data),
+    onSuccess: (res) => {
+      toast.success(res.message ?? "Campanha duplicada com sucesso!");
+      setDuplicating(null);
+      setDupName("");
+      qc.invalidateQueries({ queryKey: ["campaigns"] });
+    },
+    onError: () => toast.error("Erro ao duplicar campanha"),
+  });
+
+  function openDuplicate(c: CampaignWithMetrics) {
+    setDuplicating({ id: c.id, name: c.name ?? "" });
+    setDupName(`${c.name ?? ""} — Cópia`);
+  }
+
+  function submitDuplicate() {
+    if (!duplicating || !dupName.trim()) return;
+    dupMutation.mutate({ id: duplicating.id, new_name: dupName.trim() });
+  }
 
   // Filter logic
   const filtered = (campaigns ?? []).filter((c) => {
@@ -229,31 +254,40 @@ function CampaignsInner() {
                       <RoasBadge roas={c.roas_7d} />
                     </td>
                     <td className="py-3">
-                      {canToggle && (
+                      <div className="flex items-center gap-1.5">
+                        {canToggle && (
+                          <button
+                            disabled={isToggling || statusMutation.isPending}
+                            onClick={() =>
+                              statusMutation.mutate({
+                                id: c.id,
+                                status: c.status === "ACTIVE" ? "PAUSED" : "ACTIVE",
+                              })
+                            }
+                            title={c.status === "ACTIVE" ? "Pausar campanha" : "Ativar campanha"}
+                            className={`flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg border transition-colors ${
+                              c.status === "ACTIVE"
+                                ? "border-gray-600 text-gray-400 hover:border-yellow-500/50 hover:text-yellow-400"
+                                : "border-gray-600 text-gray-400 hover:border-green-500/50 hover:text-green-400"
+                            }`}
+                          >
+                            {isToggling ? (
+                              <Loader2 size={12} className="animate-spin" />
+                            ) : c.status === "ACTIVE" ? (
+                              <><Pause size={12} /> Pausar</>
+                            ) : (
+                              <><Play size={12} /> Ativar</>
+                            )}
+                          </button>
+                        )}
                         <button
-                          disabled={isToggling || statusMutation.isPending}
-                          onClick={() =>
-                            statusMutation.mutate({
-                              id: c.id,
-                              status: c.status === "ACTIVE" ? "PAUSED" : "ACTIVE",
-                            })
-                          }
-                          title={c.status === "ACTIVE" ? "Pausar campanha" : "Ativar campanha"}
-                          className={`flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg border transition-colors ${
-                            c.status === "ACTIVE"
-                              ? "border-gray-600 text-gray-400 hover:border-yellow-500/50 hover:text-yellow-400"
-                              : "border-gray-600 text-gray-400 hover:border-green-500/50 hover:text-green-400"
-                          }`}
+                          onClick={() => openDuplicate(c)}
+                          title="Duplicar campanha"
+                          className="flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg border border-gray-600 text-gray-400 hover:border-brand-500/50 hover:text-brand-400 transition-colors"
                         >
-                          {isToggling ? (
-                            <Loader2 size={12} className="animate-spin" />
-                          ) : c.status === "ACTIVE" ? (
-                            <><Pause size={12} /> Pausar</>
-                          ) : (
-                            <><Play size={12} /> Ativar</>
-                          )}
+                          <Copy size={12} /> Duplicar
                         </button>
-                      )}
+                      </div>
                     </td>
                   </tr>
                 );
@@ -266,6 +300,64 @@ function CampaignsInner() {
       <p className="text-xs text-gray-600 text-center">
         💡 Use o <strong className="text-gray-400">Maestro</strong> para otimizar várias campanhas de uma vez com um comando em português
       </p>
+
+      {/* Modal duplicar */}
+      {duplicating && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+          <div className="bg-surface-card border border-surface-border rounded-2xl p-6 w-full max-w-md shadow-2xl">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-base font-semibold text-white flex items-center gap-2">
+                <Copy size={16} className="text-brand-400" />
+                Duplicar Campanha
+              </h3>
+              <button
+                onClick={() => { setDuplicating(null); setDupName(""); }}
+                className="text-gray-500 hover:text-white transition-colors"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <p className="text-xs text-gray-500 mb-1">Original:</p>
+            <p className="text-sm text-gray-300 mb-4 truncate">{duplicating.name}</p>
+
+            <label className="block text-xs text-gray-400 mb-1.5">Nome da cópia</label>
+            <input
+              type="text"
+              value={dupName}
+              onChange={(e) => setDupName(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && submitDuplicate()}
+              placeholder="Nome da nova campanha..."
+              className="w-full bg-surface-border border border-surface-border text-white text-sm rounded-xl px-3 py-2.5 outline-none focus:ring-1 focus:ring-brand-500 placeholder-gray-600"
+              autoFocus
+            />
+
+            <p className="text-[11px] text-gray-600 mt-2">
+              A cópia inclui todos os conjuntos e anúncios. Será criada <strong className="text-gray-400">pausada</strong>.
+            </p>
+
+            <div className="flex gap-2 mt-5">
+              <button
+                onClick={() => { setDuplicating(null); setDupName(""); }}
+                className="flex-1 py-2 rounded-xl border border-surface-border text-gray-400 text-sm hover:text-white transition-colors"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={submitDuplicate}
+                disabled={!dupName.trim() || dupMutation.isPending}
+                className="flex-1 py-2 rounded-xl bg-brand-500 hover:bg-brand-600 disabled:opacity-50 text-white text-sm font-medium transition-colors flex items-center justify-center gap-2"
+              >
+                {dupMutation.isPending ? (
+                  <><Loader2 size={14} className="animate-spin" /> Duplicando…</>
+                ) : (
+                  <><Copy size={14} /> Duplicar</>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
