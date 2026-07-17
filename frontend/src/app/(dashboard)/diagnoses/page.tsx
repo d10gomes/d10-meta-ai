@@ -131,7 +131,7 @@ function DiagnosisCard({ d }: { d: Diagnosis }) {
   const icon = SEVERITY_ICON[d.severity] || "🟡";
   const severityLabel = SEVERITY_LABEL[d.severity] || d.severity;
   const tip = ISSUE_TIPS[d.issue_type] || ISSUE_TIPS[d.issue_type?.toLowerCase()] || null;
-  const entityLabel = ENTITY_LABEL[d.entity_type] || d.entity_type;
+  const entityLabel = (d.entity_type ? ENTITY_LABEL[d.entity_type] : null) || d.entity_type;
 
   return (
     <div className="card border border-surface-border">
