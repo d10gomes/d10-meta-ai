@@ -13,6 +13,10 @@ type CampaignWithMetrics = Campaign & {
   spend_7d?: number | null;
   conversions_7d?: number | null;
   roas_7d?: number | null;
+  cpa_7d?: number | null;
+  ctr_7d?: number | null;
+  clicks_7d?: number | null;
+  impressions_7d?: number | null;
 };
 
 function healthScore(c: CampaignWithMetrics): { icon: string; label: string; color: string } {
@@ -198,12 +202,14 @@ function CampaignsInner() {
               <tr className="text-gray-500 border-b border-surface-border text-left text-xs uppercase tracking-wider">
                 <th className="pb-3 pr-3">Saúde</th>
                 <th className="pb-3 pr-3">Nome</th>
-                <th className="pb-3 pr-3">Objetivo</th>
                 <th className="pb-3 pr-3">Status</th>
-                <th className="pb-3 pr-3">Orç./dia</th>
-                <th className="pb-3 pr-3">Gasto 7d</th>
-                <th className="pb-3 pr-3">Conversões 7d</th>
-                <th className="pb-3 pr-3">ROAS 7d</th>
+                <th className="pb-3 pr-3 text-right">Orç./dia</th>
+                <th className="pb-3 pr-3 text-right">Gasto 7d</th>
+                <th className="pb-3 pr-3 text-right">Conv. 7d</th>
+                <th className="pb-3 pr-3 text-right">CPA</th>
+                <th className="pb-3 pr-3 text-right">ROAS</th>
+                <th className="pb-3 pr-3 text-right">CTR</th>
+                <th className="pb-3 pr-3 text-right">Cliques</th>
                 <th className="pb-3">Ação</th>
               </tr>
             </thead>
@@ -220,38 +226,50 @@ function CampaignsInner() {
                     <td className="py-3 pr-3">
                       <span title={health.label}>{health.icon}</span>
                     </td>
-                    <td className="py-3 pr-3 max-w-[200px] truncate">
+                    <td className="py-3 pr-3 max-w-[180px]">
                       <Link
                         href={`/campaigns/${c.id}`}
-                        className="text-white font-medium hover:text-brand-400 transition-colors"
+                        className="text-white font-medium hover:text-brand-400 transition-colors block truncate"
                         title={c.name ?? ""}
                       >
                         {c.name || "—"}
                       </Link>
-                    </td>
-                    <td className="py-3 pr-3 text-gray-400 text-xs whitespace-nowrap">
-                      {translateObjective(c.objective)}
                     </td>
                     <td className="py-3 pr-3">
                       <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${STATUS_STYLE[c.status ?? ""] || "text-gray-400"}`}>
                         {translateStatus(c.status)}
                       </span>
                     </td>
-                    <td className="py-3 pr-3 text-gray-300 text-xs whitespace-nowrap">
+                    <td className="py-3 pr-3 text-gray-300 text-xs text-right whitespace-nowrap">
                       {formatBudget(c.daily_budget)}
                     </td>
-                    <td className="py-3 pr-3 text-gray-300 text-xs whitespace-nowrap">
+                    <td className="py-3 pr-3 text-gray-300 text-xs text-right whitespace-nowrap">
                       {c.spend_7d != null ? fmtBRL(c.spend_7d) : <span className="text-gray-600">—</span>}
                     </td>
-                    <td className="py-3 pr-3 text-gray-300 text-xs">
+                    <td className="py-3 pr-3 text-right">
                       {c.conversions_7d != null ? (
-                        <span className={c.conversions_7d > 0 ? "text-green-400 font-semibold" : "text-gray-500"}>
+                        <span className={`text-xs font-semibold ${c.conversions_7d > 0 ? "text-green-400" : "text-gray-500"}`}>
                           {c.conversions_7d.toLocaleString("pt-BR")}
                         </span>
-                      ) : <span className="text-gray-600">—</span>}
+                      ) : <span className="text-gray-600 text-xs">—</span>}
                     </td>
-                    <td className="py-3 pr-3">
+                    <td className="py-3 pr-3 text-right">
+                      {c.cpa_7d != null ? (
+                        <span className="text-xs font-semibold text-yellow-400">{fmtBRL(c.cpa_7d)}</span>
+                      ) : <span className="text-gray-600 text-xs">—</span>}
+                    </td>
+                    <td className="py-3 pr-3 text-right">
                       <RoasBadge roas={c.roas_7d} />
+                    </td>
+                    <td className="py-3 pr-3 text-right">
+                      {c.ctr_7d != null ? (
+                        <span className="text-xs text-gray-300">{c.ctr_7d.toFixed(2)}%</span>
+                      ) : <span className="text-gray-600 text-xs">—</span>}
+                    </td>
+                    <td className="py-3 pr-3 text-right">
+                      {c.clicks_7d != null ? (
+                        <span className="text-xs text-gray-300">{c.clicks_7d.toLocaleString("pt-BR")}</span>
+                      ) : <span className="text-gray-600 text-xs">—</span>}
                     </td>
                     <td className="py-3">
                       <div className="flex items-center gap-1.5">

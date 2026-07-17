@@ -81,6 +81,10 @@ class CampaignOut(BaseModel):
     spend_7d: float | None = None
     conversions_7d: int | None = None
     roas_7d: float | None = None
+    cpa_7d: float | None = None
+    ctr_7d: float | None = None
+    clicks_7d: int | None = None
+    impressions_7d: int | None = None
 
 
 class CampaignCreateRequest(BaseModel):
@@ -201,6 +205,9 @@ async def list_campaigns(
                 func.sum(AdMetric.spend).label("spend"),
                 func.sum(AdMetric.conversions).label("conversions"),
                 func.sum(AdMetric.revenue).label("revenue"),
+                func.sum(AdMetric.clicks).label("clicks"),
+                func.sum(AdMetric.impressions).label("impressions"),
+                func.avg(AdMetric.ctr).label("ctr"),
             )
             .select_from(Campaign)
             .join(AdSet, AdSet.campaign_id == Campaign.id)
@@ -213,10 +220,15 @@ async def list_campaigns(
         for row in metrics_result.all():
             spend = float(row.spend or 0)
             revenue = float(row.revenue or 0)
+            conversions = int(row.conversions or 0)
             metrics_map[str(row.campaign_id)] = {
                 "spend_7d": round(spend, 2),
-                "conversions_7d": int(row.conversions or 0),
+                "conversions_7d": conversions,
                 "roas_7d": round(revenue / spend, 2) if spend > 0 else None,
+                "cpa_7d": round(spend / conversions, 2) if conversions > 0 else None,
+                "ctr_7d": round(float(row.ctr or 0), 2),
+                "clicks_7d": int(row.clicks or 0),
+                "impressions_7d": int(row.impressions or 0),
             }
 
     return [CampaignOut(
