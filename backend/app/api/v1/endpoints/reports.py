@@ -176,58 +176,74 @@ async def brand_comparison(
     period2_start = now - timedelta(days=half)        # início da segunda metade
     period2_end   = now                              # hoje
 
+    # Pré-carrega ad_ids do tenant para queries posteriores
+    all_ad_ids = await _get_ad_ids_for_tenant(current_user.tenant_id, db)
+
+    async def _get_brand_ad_ids(patterns) -> list[str]:
+        """Ad IDs filtrados por nome de campanha (padrão ILIKE)."""
+        if not all_ad_ids:
+            return []
+        brand_filter = or_(*[Campaign.name.ilike(p) for p in patterns])
+        result = await db.execute(
+            select(Ad.id)
+            .select_from(Ad)
+            .join(AdSet, Ad.adset_id == AdSet.id)
+            .join(Campaign, AdSet.campaign_id == Campaign.id)
+            .where(Campaign.id.in_(
+                select(Campaign.id)
+                .join(MetaAccount, Campaign.meta_account_id == MetaAccount.id)
+                .where(MetaAccount.tenant_id == str(current_user.tenant_id), brand_filter)
+            ))
+        )
+        return [str(r[0]) for r in result.fetchall()]
+
     brands_result = []
 
     for brand_name, patterns in BRAND_PATTERNS.items():
-        # Filtro de nome de campanha por padrões ILIKE
-        brand_filter = or_(*[Campaign.name.ilike(p) for p in patterns])
+        brand_ad_ids = await _get_brand_ad_ids(patterns)
 
-        def _base_q(since, until):
-            return (
+        async def _agg(ad_ids, since, until):
+            if not ad_ids:
+                return None
+            return (await db.execute(
                 select(
                     func.sum(AdMetric.spend).label("spend"),
                     func.sum(AdMetric.clicks).label("clicks"),
                     func.sum(AdMetric.impressions).label("impressions"),
                     func.sum(AdMetric.conversions).label("conversions"),
-                    func.avg(AdMetric.cpc).label("cpc"),
-                    func.avg(AdMetric.ctr).label("ctr"),
-                    func.avg(AdMetric.cpa).label("cpa"),
-                    func.avg(AdMetric.cpm).label("cpm"),
                 )
-                .join(Ad, AdMetric.ad_id == Ad.id)
-                .join(AdSet, Ad.adset_id == AdSet.id)
-                .join(Campaign, AdSet.campaign_id == Campaign.id)
-                .join(MetaAccount, Campaign.meta_account_id == MetaAccount.id)
                 .where(
-                    MetaAccount.tenant_id == current_user.tenant_id,
-                    brand_filter,
+                    AdMetric.ad_id.in_(ad_ids),
                     AdMetric.date >= since,
                     AdMetric.date < until,
                 )
-            )
+            )).one()
 
-        r1 = (await db.execute(_base_q(period1_start, period1_end))).one()
-        r2 = (await db.execute(_base_q(period2_start, period2_end))).one()
+        r1 = await _agg(brand_ad_ids, period1_start, period1_end)
+        r2 = await _agg(brand_ad_ids, period2_start, period2_end)
 
         def _row(r):
-            spend   = float(r.spend or 0)
-            clicks  = int(r.clicks or 0)
-            conv    = int(r.conversions or 0)
-            cpc     = float(r.cpc or 0)
-            ctr     = float(r.ctr or 0)
-            cpa     = float(r.cpa or 0)
-            cpm     = float(r.cpm or 0)
-            imp     = int(r.impressions or 0)
+            if r is None:
+                return {"spend": 0, "clicks": 0, "impressions": 0, "conversions": 0,
+                        "cpc": 0, "ctr": 0, "cpa": 0, "cpm": 0, "conv_rate": 0}
+            spend  = float(r.spend or 0)
+            clicks = int(r.clicks or 0)
+            imp    = int(r.impressions or 0)
+            conv   = int(r.conversions or 0)
+            cpc    = round(spend / clicks, 2) if clicks > 0 else 0
+            ctr    = round(clicks / imp * 100, 2) if imp > 0 else 0
+            cpa    = round(spend / conv, 2) if conv > 0 else 0
+            cpm    = round(spend / imp * 1000, 2) if imp > 0 else 0
             conv_rate = round(conv / clicks * 100, 2) if clicks > 0 else 0
             return {
                 "spend": round(spend, 2),
                 "clicks": clicks,
                 "impressions": imp,
                 "conversions": conv,
-                "cpc": round(cpc, 2),
-                "ctr": round(ctr, 2),
-                "cpa": round(cpa, 2),
-                "cpm": round(cpm, 2),
+                "cpc": cpc,
+                "ctr": ctr,
+                "cpa": cpa,
+                "cpm": cpm,
                 "conv_rate": conv_rate,
             }
 
@@ -294,17 +310,9 @@ async def brand_comparison(
                 func.sum(AdMetric.spend).label("spend"),
                 func.sum(AdMetric.clicks).label("clicks"),
                 func.sum(AdMetric.conversions).label("conversions"),
-                func.avg(AdMetric.cpc).label("cpc"),
-                func.avg(AdMetric.ctr).label("ctr"),
-                func.avg(AdMetric.cpa).label("cpa"),
             )
-            .join(Ad, AdMetric.ad_id == Ad.id)
-            .join(AdSet, Ad.adset_id == AdSet.id)
-            .join(Campaign, AdSet.campaign_id == Campaign.id)
-            .join(MetaAccount, Campaign.meta_account_id == MetaAccount.id)
             .where(
-                MetaAccount.tenant_id == current_user.tenant_id,
-                brand_filter,
+                AdMetric.ad_id.in_(brand_ad_ids) if brand_ad_ids else (AdMetric.id == None),
                 AdMetric.date >= period1_start,
             )
             .group_by(func.date_trunc("week", AdMetric.date))
@@ -314,14 +322,14 @@ async def brand_comparison(
         for r in timeline_q.all():
             clicks_w = int(r.clicks or 0)
             conv_w   = int(r.conversions or 0)
+            spend_w  = float(r.spend or 0)
             timeline.append({
                 "week": r.week.date().isoformat(),
-                "spend": round(float(r.spend or 0), 2),
+                "spend": round(spend_w, 2),
                 "clicks": clicks_w,
                 "conversions": conv_w,
-                "cpc": round(float(r.cpc or 0), 2),
-                "ctr": round(float(r.ctr or 0), 2),
-                "cpa": round(float(r.cpa or 0), 2),
+                "cpc": round(spend_w / clicks_w, 2) if clicks_w > 0 else 0,
+                "cpa": round(spend_w / conv_w, 2) if conv_w > 0 else 0,
                 "conv_rate": round(conv_w / clicks_w * 100, 2) if clicks_w > 0 else 0,
             })
 
