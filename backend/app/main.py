@@ -31,6 +31,7 @@ async def _startup_scan():
 
 async def _run_migrations():
     """Add new columns without Alembic — safe to run on every startup."""
+    import os
     migrations = [
         "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS telegram_chat_id VARCHAR(100)",
         "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS whatsapp_number VARCHAR(30)",
@@ -39,6 +40,16 @@ async def _run_migrations():
         async with engine.begin() as conn:
             for sql in migrations:
                 await conn.execute(sqlalchemy.text(sql))
+            # Sincroniza TELEGRAM_CHAT_ID do env para todos os tenants ativos
+            chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+            if chat_id:
+                await conn.execute(
+                    sqlalchemy.text(
+                        "UPDATE tenants SET telegram_chat_id = :cid WHERE is_active = true AND (telegram_chat_id IS NULL OR telegram_chat_id = '')"
+                    ),
+                    {"cid": chat_id},
+                )
+                logger.info("migrations.telegram_chat_id_synced", chat_id=chat_id)
         logger.info("migrations.done")
     except Exception as exc:
         logger.warning("migrations.failed", error=str(exc))

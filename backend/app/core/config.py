@@ -48,6 +48,7 @@ class Settings(BaseSettings):
 
     # Telegram bot for notifications
     TELEGRAM_BOT_TOKEN: str = ""
+    TELEGRAM_CHAT_ID: str = ""
 
     # Scheduler
     SCANNER_INTERVAL_MINUTES: int = 30

@@ -106,6 +106,26 @@ async def send_action_approval_request(
         return False
 
 
+async def send_alert(chat_id: str, message: str, parse_mode: str = "Markdown") -> bool:
+    """Envia alerta simples de texto para o chat_id informado."""
+    token = settings.TELEGRAM_BOT_TOKEN
+    if not token or not chat_id:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat_id, "text": message, "parse_mode": parse_mode},
+            )
+            if not resp.is_success:
+                logger.warning("telegram.alert_failed", status=resp.status_code)
+                return False
+        return True
+    except Exception as exc:
+        logger.warning("telegram.alert_error", error=str(exc))
+        return False
+
+
 async def answer_callback(callback_query_id: str, text: str) -> None:
     """Confirma o clique no botão para o Telegram (remove o loading)."""
     token = settings.TELEGRAM_BOT_TOKEN

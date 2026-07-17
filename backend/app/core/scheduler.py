@@ -24,6 +24,18 @@ scheduler = AsyncIOScheduler(timezone="America/Sao_Paulo")
 # Helpers
 # ---------------------------------------------------------------------------
 
+async def _send_scanner_alert(message: str) -> None:
+    """Envia alerta de falha do scanner via Telegram."""
+    try:
+        from app.core.config import settings
+        from app.core.telegram import send_alert
+        chat_id = settings.TELEGRAM_CHAT_ID
+        if chat_id and settings.TELEGRAM_BOT_TOKEN:
+            await send_alert(chat_id, f"🤖 *D10 Meta AI*\n\n{message}", parse_mode="Markdown")
+    except Exception as exc:
+        logger.warning("scanner.alert_failed", error=str(exc))
+
+
 async def _get_tenant_ids() -> list[str]:
     from app.db.session import AsyncSessionLocal
     from sqlalchemy import text
@@ -112,9 +124,12 @@ async def job_scanner():
 
         await _finish_run(run_id, started, items=ok)
         logger.info("scanner.scheduled_done", accounts=ok)
+        if ok == 0 and account_data:
+            await _send_scanner_alert(f"⚠️ Scanner rodou mas nenhuma conta sincronizou ({len(account_data)} contas tentadas). Verifique tokens Meta.")
     except Exception as exc:
         await _finish_run(run_id, started, error=str(exc))
         logger.error("scanner.scheduled_error", error=str(exc))
+        await _send_scanner_alert(f"🔴 Scanner falhou com erro: {str(exc)[:200]}")
 
 
 async def job_analyst():
