@@ -151,6 +151,17 @@ class MetaAdsClient:
         return items[0] if items else {}
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    async def get_ad_insights_daily(self, ad_id: str, days: int = 30) -> List[Dict]:
+        """Retorna insights diários para os últimos N dias (um item por dia)."""
+        path = f"/{ad_id}/insights"
+        data = await self._get(path, {
+            "fields": INSIGHT_FIELDS,
+            "date_preset": f"last_{days}d",
+            "time_increment": 1,
+        })
+        return data.get("data", [])
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     async def get_campaign_insights(self, campaign_id: str, date_preset: str = "last_7d") -> Dict:
         path = f"/{campaign_id}/insights"
         data = await self._get(path, {"fields": INSIGHT_FIELDS, "date_preset": date_preset})

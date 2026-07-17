@@ -180,12 +180,15 @@ class ScannerService(AgentBase):
                 "creative_id": creative.get("id"),
                 "creative_type": creative.get("object_type"),
             })
-            insights = await client.get_ad_insights(ad_data["id"])
-            if insights:
-                await self._save_metrics(ad, insights)
-                spend = float(insights.get("spend", 0))
-                summary["total_spend_today"] += spend
-                ad_summaries.append({"id": ad_data["id"], "spend": spend})
+            # Busca insights diários dos últimos 30 dias
+            daily_insights = await client.get_ad_insights_daily(ad_data["id"], days=30)
+            total_spend = 0.0
+            for day_insight in daily_insights:
+                await self._save_metrics(ad, day_insight)
+                total_spend += float(day_insight.get("spend", 0))
+            summary["total_spend_today"] += total_spend
+            if daily_insights:
+                ad_summaries.append({"id": ad_data["id"], "spend": total_spend})
         return ad_summaries
 
     async def _save_metrics(self, ad, insights: dict):
@@ -198,9 +201,20 @@ class ScannerService(AgentBase):
         conversions = int(actions.get("purchase", actions.get("lead", 0)))
         revenue = action_values.get("purchase", 0.0)
         m = CampaignMetrics.compute(imp, clicks, spend, conversions, revenue, reach)
+        # Usa a data retornada pela API Meta (campo "date_start"), senão usa hoje
+        date_str = insights.get("date_start")
+        if date_str:
+            try:
+                metric_date = datetime.strptime(date_str, "%Y-%m-%d").replace(
+                    hour=0, minute=0, second=0, microsecond=0
+                )
+            except ValueError:
+                metric_date = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        else:
+            metric_date = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
         await self._campaign_repo.upsert_metric({
             "ad_id": str(ad.id),
-            "date": datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0),
+            "date": metric_date,
             "impressions": m.impressions, "clicks": m.clicks, "spend": m.spend,
             "conversions": m.conversions, "revenue": m.revenue, "reach": m.reach,
             "ctr": m.ctr, "cpc": m.cpc, "cpm": m.cpm, "cpa": m.cpa,
