@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select, func, or_
+from sqlalchemy import select, func, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_user
@@ -17,6 +17,19 @@ BRAND_PATTERNS = {
 }
 
 
+async def _get_ad_ids_for_tenant(tenant_id: str, db: AsyncSession) -> list[str]:
+    """Retorna todos os ad_ids que pertencem ao tenant — mesmo padrão que funciona em campaigns.py."""
+    result = await db.execute(
+        select(Ad.id)
+        .select_from(Ad)
+        .join(AdSet, Ad.adset_id == AdSet.id)
+        .join(Campaign, AdSet.campaign_id == Campaign.id)
+        .join(MetaAccount, Campaign.meta_account_id == MetaAccount.id)
+        .where(MetaAccount.tenant_id == str(tenant_id))
+    )
+    return [str(row[0]) for row in result.fetchall()]
+
+
 @router.get("/summary")
 async def get_summary(
     days: int = Query(7, ge=1, le=180),
@@ -24,6 +37,12 @@ async def get_summary(
     db: AsyncSession = Depends(get_db),
 ):
     since = datetime.utcnow() - timedelta(days=days)
+    ad_ids = await _get_ad_ids_for_tenant(current_user.tenant_id, db)
+    if not ad_ids:
+        return {"period_days": days, "spend": 0, "clicks": 0, "impressions": 0,
+                "conversions": 0, "revenue": 0, "ctr": 0, "cpa": 0, "roas": 0,
+                "cpm": 0, "frequency": 0}
+
     result = await db.execute(
         select(
             func.sum(AdMetric.spend).label("spend"),
@@ -32,30 +51,27 @@ async def get_summary(
             func.sum(AdMetric.conversions).label("conversions"),
             func.sum(AdMetric.revenue).label("revenue"),
             func.avg(AdMetric.ctr).label("ctr"),
-            func.avg(AdMetric.cpa).label("cpa"),
-            func.avg(AdMetric.roas).label("roas"),
             func.avg(AdMetric.cpm).label("cpm"),
             func.avg(AdMetric.frequency).label("frequency"),
         )
-        .join(Ad, AdMetric.ad_id == Ad.id)
-        .join(AdSet, Ad.adset_id == AdSet.id)
-        .join(Campaign, AdSet.campaign_id == Campaign.id)
-        .join(MetaAccount, Campaign.meta_account_id == MetaAccount.id)
-        .where(MetaAccount.tenant_id == current_user.tenant_id, AdMetric.date >= since)
+        .where(AdMetric.ad_id.in_(ad_ids), AdMetric.date >= since)
     )
     row = result.one()
+    spend = float(row.spend or 0)
+    conversions = int(row.conversions or 0)
+    revenue = float(row.revenue or 0)
     return {
         "period_days": days,
-        "spend": round(row.spend or 0, 2),
-        "clicks": row.clicks or 0,
-        "impressions": row.impressions or 0,
-        "conversions": row.conversions or 0,
-        "revenue": round(row.revenue or 0, 2),
-        "ctr": round(row.ctr or 0, 4),
-        "cpa": round(row.cpa or 0, 2),
-        "roas": round(row.roas or 0, 2),
-        "cpm": round(row.cpm or 0, 2),
-        "frequency": round(row.frequency or 0, 2),
+        "spend": round(spend, 2),
+        "clicks": int(row.clicks or 0),
+        "impressions": int(row.impressions or 0),
+        "conversions": conversions,
+        "revenue": round(revenue, 2),
+        "ctr": round(float(row.ctr or 0), 4),
+        "cpa": round(spend / conversions, 2) if conversions > 0 else 0,
+        "roas": round(revenue / spend, 2) if spend > 0 else 0,
+        "cpm": round(float(row.cpm or 0), 2),
+        "frequency": round(float(row.frequency or 0), 2),
     }
 
 
@@ -66,18 +82,18 @@ async def get_timeline(
     db: AsyncSession = Depends(get_db),
 ):
     since = datetime.utcnow() - timedelta(days=days)
+    ad_ids = await _get_ad_ids_for_tenant(current_user.tenant_id, db)
+    if not ad_ids:
+        return []
+
     result = await db.execute(
         select(
             func.date_trunc("day", AdMetric.date).label("day"),
             func.sum(AdMetric.spend).label("spend"),
             func.sum(AdMetric.conversions).label("conversions"),
-            func.avg(AdMetric.roas).label("roas"),
+            func.sum(AdMetric.revenue).label("revenue"),
         )
-        .join(Ad, AdMetric.ad_id == Ad.id)
-        .join(AdSet, Ad.adset_id == AdSet.id)
-        .join(Campaign, AdSet.campaign_id == Campaign.id)
-        .join(MetaAccount, Campaign.meta_account_id == MetaAccount.id)
-        .where(MetaAccount.tenant_id == current_user.tenant_id, AdMetric.date >= since)
+        .where(AdMetric.ad_id.in_(ad_ids), AdMetric.date >= since)
         .group_by(func.date_trunc("day", AdMetric.date))
         .order_by(func.date_trunc("day", AdMetric.date))
     )
@@ -85,9 +101,9 @@ async def get_timeline(
     return [
         {
             "day": row.day.date().isoformat(),
-            "spend": round(row.spend or 0, 2),
-            "conversions": row.conversions or 0,
-            "roas": round(row.roas or 0, 2),
+            "spend": round(float(row.spend or 0), 2),
+            "conversions": int(row.conversions or 0),
+            "roas": round(float(row.revenue or 0) / float(row.spend), 2) if row.spend else 0,
         }
         for row in rows
     ]
@@ -106,17 +122,17 @@ async def data_status(
     )
     accounts_count = accounts_result.scalar() or 0
 
-    # Conta métricas dos últimos 30 dias
+    # Conta métricas dos últimos 30 dias usando ad_ids (mesmo padrão que funciona)
     since = datetime.utcnow() - timedelta(days=30)
-    metrics_result = await db.execute(
-        select(func.count(AdMetric.id))
-        .join(Ad, AdMetric.ad_id == Ad.id)
-        .join(AdSet, Ad.adset_id == AdSet.id)
-        .join(Campaign, AdSet.campaign_id == Campaign.id)
-        .join(MetaAccount, Campaign.meta_account_id == MetaAccount.id)
-        .where(MetaAccount.tenant_id == current_user.tenant_id, AdMetric.date >= since)
-    )
-    metrics_count = metrics_result.scalar() or 0
+    ad_ids = await _get_ad_ids_for_tenant(current_user.tenant_id, db)
+    if ad_ids:
+        metrics_result = await db.execute(
+            select(func.count(AdMetric.id))
+            .where(AdMetric.ad_id.in_(ad_ids), AdMetric.date >= since)
+        )
+        metrics_count = metrics_result.scalar() or 0
+    else:
+        metrics_count = 0
 
     # Última execução do scanner
     run_result = await db.execute(
