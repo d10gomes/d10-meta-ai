@@ -18,6 +18,17 @@ from app.db.session import engine, Base
 from app.infrastructure.cache.redis_client import redis_client
 
 
+async def _startup_scan():
+    """Roda o scanner uma vez após o startup para garantir dados frescos."""
+    try:
+        from app.core.scheduler import job_scanner
+        logger.info("startup_scan.starting")
+        await job_scanner()
+        logger.info("startup_scan.done")
+    except Exception as exc:
+        logger.warning("startup_scan.failed", error=str(exc))
+
+
 async def _run_migrations():
     """Add new columns without Alembic — safe to run on every startup."""
     migrations = [
@@ -53,6 +64,8 @@ async def lifespan(app: FastAPI):
     setup_scheduler()
     scheduler.start()
     logger.info("scheduler.started")
+    # Dispara o scanner 30s após o início para popular dados imediatamente
+    asyncio.get_event_loop().call_later(30, lambda: asyncio.create_task(_startup_scan()))
     yield
     scheduler.shutdown(wait=False)
     logger.info("scheduler.stopped")

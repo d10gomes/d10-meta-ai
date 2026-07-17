@@ -42,6 +42,19 @@ export default function DashboardPage() {
   const [period, setPeriod] = useState<Period>(PERIODS[2]); // 7 dias default
   const [chartMetric, setChartMetric] = useState<"spend" | "roas" | "conversions">("spend");
 
+  const { data: dataStatus } = useQuery<{
+    accounts_connected: number;
+    metrics_last_30d: number;
+    has_data: boolean;
+    last_scanner_run: string | null;
+    last_scanner_status: string | null;
+    last_scanner_error: string | null;
+  }>({
+    queryKey: ["data-status"],
+    queryFn: () => api.get("/reports/data-status").then((r) => r.data),
+    refetchInterval: 30000,
+  });
+
   const { data: summary, isLoading: loadingKPIs } = useQuery<ReportSummary>({
     queryKey: ["summary", period.days],
     queryFn: () => api.get(`/reports/summary?days=${period.days}`).then((r) => r.data),
@@ -112,6 +125,42 @@ export default function DashboardPage() {
           ))}
         </div>
       </div>
+
+      {/* Banner: nenhuma conta Meta conectada */}
+      {dataStatus && dataStatus.accounts_connected === 0 && (
+        <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-xl p-4 flex items-start gap-3">
+          <span className="text-2xl">🔗</span>
+          <div>
+            <p className="font-semibold text-yellow-300">Conecte sua conta Meta Ads</p>
+            <p className="text-sm text-yellow-400/80 mt-0.5">
+              Você ainda não conectou nenhuma conta. Acesse{" "}
+              <a href="/accounts" className="underline font-medium hover:text-yellow-200">Contas Meta</a>{" "}
+              para conectar e começar a ver seus dados.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Banner: conta conectada mas sem dados — scanner pendente */}
+      {dataStatus && dataStatus.accounts_connected > 0 && !dataStatus.has_data && (
+        <div className="bg-blue-500/10 border border-blue-500/30 rounded-xl p-4 flex items-start gap-3">
+          <span className="text-2xl">⏳</span>
+          <div>
+            <p className="font-semibold text-blue-300">Sincronizando dados do Meta Ads…</p>
+            <p className="text-sm text-blue-400/80 mt-0.5">
+              {dataStatus.last_scanner_status === "running"
+                ? "O Scanner está rodando agora — os dados aparecerão em instantes."
+                : dataStatus.last_scanner_error
+                ? `Último scan falhou: ${dataStatus.last_scanner_error.slice(0, 80)}. Acesse `
+                : "O Scanner iniciará automaticamente. Você também pode disparar manualmente em "}
+              {dataStatus.last_scanner_status !== "running" && (
+                <a href="/agents" className="underline font-medium hover:text-blue-200">Agentes</a>
+              )}
+              {dataStatus.last_scanner_status !== "running" && " → Executar agora."}
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* Alert banner */}
       {criticalIssues.length > 0 && (

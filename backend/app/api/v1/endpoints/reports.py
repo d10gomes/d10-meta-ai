@@ -4,7 +4,7 @@ from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_user
-from app.db.models import User, AdMetric, Ad, AdSet, Campaign, MetaAccount
+from app.db.models import User, AdMetric, Ad, AdSet, Campaign, MetaAccount, AgentRun
 from app.db.session import get_db
 
 router = APIRouter()
@@ -91,6 +91,50 @@ async def get_timeline(
         }
         for row in rows
     ]
+
+
+@router.get("/data-status")
+async def data_status(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Retorna quantos dados existem no banco para o tenant — usado pelo dashboard para guiar o usuário."""
+    # Conta contas Meta conectadas
+    accounts_result = await db.execute(
+        select(func.count(MetaAccount.id))
+        .where(MetaAccount.tenant_id == current_user.tenant_id, MetaAccount.is_active == True)
+    )
+    accounts_count = accounts_result.scalar() or 0
+
+    # Conta métricas dos últimos 30 dias
+    since = datetime.utcnow() - timedelta(days=30)
+    metrics_result = await db.execute(
+        select(func.count(AdMetric.id))
+        .join(Ad, AdMetric.ad_id == Ad.id)
+        .join(AdSet, Ad.adset_id == AdSet.id)
+        .join(Campaign, AdSet.campaign_id == Campaign.id)
+        .join(MetaAccount, Campaign.meta_account_id == MetaAccount.id)
+        .where(MetaAccount.tenant_id == current_user.tenant_id, AdMetric.date >= since)
+    )
+    metrics_count = metrics_result.scalar() or 0
+
+    # Última execução do scanner
+    run_result = await db.execute(
+        select(AgentRun)
+        .where(AgentRun.agent_name == "scanner")
+        .order_by(AgentRun.started_at.desc())
+        .limit(1)
+    )
+    last_scan = run_result.scalar_one_or_none()
+
+    return {
+        "accounts_connected": accounts_count,
+        "metrics_last_30d": metrics_count,
+        "has_data": metrics_count > 0,
+        "last_scanner_run": last_scan.started_at.isoformat() if last_scan else None,
+        "last_scanner_status": last_scan.status if last_scan else None,
+        "last_scanner_error": last_scan.error if last_scan else None,
+    }
 
 
 @router.get("/brand-comparison")
