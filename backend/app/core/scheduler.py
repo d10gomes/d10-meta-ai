@@ -256,60 +256,60 @@ async def job_learning():
 # ---------------------------------------------------------------------------
 
 def setup_scheduler():
-    # 1. Scanner — coleta dados brutos (00h, 06h, 12h, 18h)
+    # 1. Scanner — coleta dados brutos (a cada 2h: 0,2,4,6,8,10,12,14,16,18,20,22)
     scheduler.add_job(
         job_scanner,
-        CronTrigger(hour="0,6,12,18", minute=0),
+        CronTrigger(hour="0,2,4,6,8,10,12,14,16,18,20,22", minute=0),
         id="scanner",
         name="Scanner — Sincronizar Meta Ads",
         replace_existing=True,
         misfire_grace_time=300,
     )
 
-    # 2. Analyst — analisa e publica na KB (15 min depois do scanner)
+    # 2. Analyst — 15 min depois do scanner
     scheduler.add_job(
         job_analyst,
-        CronTrigger(hour="0,6,12,18", minute=15),
+        CronTrigger(hour="0,2,4,6,8,10,12,14,16,18,20,22", minute=15),
         id="analyst",
         name="Analyst — Análise de Performance",
         replace_existing=True,
         misfire_grace_time=300,
     )
 
-    # 3. Doctor — diagnóstico profundo (25 min depois do scanner)
+    # 3. Doctor — 25 min depois do scanner
     scheduler.add_job(
         job_doctor,
-        CronTrigger(hour="0,6,12,18", minute=25),
+        CronTrigger(hour="0,2,4,6,8,10,12,14,16,18,20,22", minute=25),
         id="doctor",
         name="Doctor — Diagnóstico de Campanhas",
         replace_existing=True,
         misfire_grace_time=300,
     )
 
-    # 4. Decision — toma decisões baseadas em diagnósticos e análises
+    # 4. Decision — 35 min depois do scanner
     scheduler.add_job(
         job_decision,
-        CronTrigger(hour="0,6,12,18", minute=35),
+        CronTrigger(hour="0,2,4,6,8,10,12,14,16,18,20,22", minute=35),
         id="decision",
         name="Decision — Tomar Decisões",
         replace_existing=True,
         misfire_grace_time=300,
     )
 
-    # 5. Creative — avalia criativos
+    # 5. Creative — 40 min depois do scanner
     scheduler.add_job(
         job_creative,
-        CronTrigger(hour="0,6,12,18", minute=40),
+        CronTrigger(hour="0,2,4,6,8,10,12,14,16,18,20,22", minute=40),
         id="creative",
         name="Creative — Análise de Criativos",
         replace_existing=True,
         misfire_grace_time=300,
     )
 
-    # 6. Budget Optimizer — redistribui budgets (1h depois do scanner)
+    # 6. Budget Optimizer — redistribui budgets (50 min depois do scanner, a cada 2h)
     scheduler.add_job(
         job_budget_optimizer,
-        CronTrigger(hour="1,7,13,19", minute=0),
+        CronTrigger(hour="0,2,4,6,8,10,12,14,16,18,20,22", minute=50),
         id="budget_optimizer",
         name="Budget Optimizer — Redistribuir Budgets",
         replace_existing=True,
@@ -356,10 +356,10 @@ def setup_scheduler():
         misfire_grace_time=600,
     )
 
-    # 11. Performance Monitor — análise contínua 24h (00h, 06h, 12h, 18h + 50min)
+    # 11. Performance Monitor — análise a cada 2h (45 min depois do scanner)
     scheduler.add_job(
         job_performance_monitor,
-        CronTrigger(hour="0,6,12,18", minute=50),
+        CronTrigger(hour="0,2,4,6,8,10,12,14,16,18,20,22", minute=45),
         id="performance_monitor",
         name="Performance Monitor — Análise 24h Blaze/Circo/MMABET",
         replace_existing=True,
