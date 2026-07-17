@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.v1.deps import get_current_user
 from app.core.exceptions import MetaAPIError
 from app.core.logging import logger
-from app.db.models import User, Campaign, MetaAccount, AdSet, Ad, AdMetric
+from app.db.models import User, Campaign, MetaAccount, AdSet, Ad, AdMetric, AgentAction
 from app.db.session import get_db
 from app.infrastructure.meta_api.client import MetaAdsClient
 from app.infrastructure.repositories.meta_account_repository import MetaAccountRepository
