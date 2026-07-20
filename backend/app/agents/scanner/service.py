@@ -191,15 +191,33 @@ class ScannerService(AgentBase):
                 ad_summaries.append({"id": ad_data["id"], "spend": total_spend})
         return ad_summaries
 
+    @staticmethod
+    def _safe_float(v, max_val: float = 9_999_999.0) -> float:
+        import math
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return 0.0
+        if math.isnan(f) or math.isinf(f):
+            return 0.0
+        return min(max(f, -max_val), max_val)
+
+    @staticmethod
+    def _safe_int(v, max_val: int = 2_147_483_647) -> int:
+        try:
+            return min(int(float(v)), max_val)
+        except (TypeError, ValueError):
+            return 0
+
     async def _save_metrics(self, ad, insights: dict):
-        imp = int(insights.get("impressions", 0))
-        clicks = int(insights.get("clicks", 0))
-        spend = float(insights.get("spend", 0))
-        reach = int(insights.get("reach", 0))
-        actions = {a["action_type"]: float(a["value"]) for a in insights.get("actions", [])}
-        action_values = {a["action_type"]: float(a["value"]) for a in insights.get("action_values", [])}
-        conversions = int(actions.get("purchase", actions.get("lead", 0)))
-        revenue = action_values.get("purchase", 0.0)
+        imp = self._safe_int(insights.get("impressions", 0))
+        clicks = self._safe_int(insights.get("clicks", 0))
+        spend = self._safe_float(insights.get("spend", 0))
+        reach = self._safe_int(insights.get("reach", 0))
+        actions = {a["action_type"]: self._safe_float(a["value"]) for a in insights.get("actions", [])}
+        action_values = {a["action_type"]: self._safe_float(a["value"]) for a in insights.get("action_values", [])}
+        conversions = self._safe_int(actions.get("purchase", actions.get("lead", 0)))
+        revenue = self._safe_float(action_values.get("purchase", 0.0))
         m = CampaignMetrics.compute(imp, clicks, spend, conversions, revenue, reach)
         # Usa a data retornada pela API Meta (campo "date_start"), senão usa hoje
         date_str = insights.get("date_start")
@@ -215,8 +233,14 @@ class ScannerService(AgentBase):
         await self._campaign_repo.upsert_metric({
             "ad_id": str(ad.id),
             "date": metric_date,
-            "impressions": m.impressions, "clicks": m.clicks, "spend": m.spend,
-            "conversions": m.conversions, "revenue": m.revenue, "reach": m.reach,
-            "ctr": m.ctr, "cpc": m.cpc, "cpm": m.cpm, "cpa": m.cpa,
-            "roas": m.roas, "frequency": m.frequency,
+            "impressions": m.impressions, "clicks": m.clicks,
+            "spend": self._safe_float(m.spend),
+            "conversions": m.conversions, "revenue": self._safe_float(m.revenue),
+            "reach": m.reach,
+            "ctr": self._safe_float(m.ctr),
+            "cpc": self._safe_float(m.cpc),
+            "cpm": self._safe_float(m.cpm),
+            "cpa": self._safe_float(m.cpa),
+            "roas": self._safe_float(m.roas),
+            "frequency": self._safe_float(m.frequency),
         })
