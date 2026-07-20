@@ -96,7 +96,13 @@ class PerformanceMonitor(AgentBase):
         brands = self._group_by_brand(metrics)
         analysis = self._analyze(brands)
 
+        # Carrega métricas da verificação anterior para mostrar deltas
+        self._prev_metrics = self._load_prev_brand_metrics(tenant_id)
+
         message = self._build_message(brands, analysis)
+
+        # Salva métricas atuais para próxima comparação
+        self._save_brand_metrics(brands, tenant_id)
         await self._send_telegram(message)
         await self._save_to_brain(analysis, message, tenant_id, brands)
 
@@ -342,12 +348,61 @@ class PerformanceMonitor(AgentBase):
 
         return {"alerts": alerts, "opportunities": opportunities, "critical": critical}
 
+    def _load_prev_brand_metrics(self, tenant_id: str) -> dict:
+        """Carrega métricas da verificação anterior para calcular deltas."""
+        try:
+            from app.core import brain
+            return brain.read("monitor/prev_brand_metrics", tenant_id=tenant_id, default={})
+        except Exception:
+            return {}
+
+    def _save_brand_metrics(self, brands: dict, tenant_id: str) -> None:
+        """Salva métricas atuais para comparação na próxima verificação."""
+        try:
+            from app.core import brain
+            snapshot = {}
+            for name, b in brands.items():
+                p7 = b["last7d"]
+                adsets = b["adsets"]
+                total_clicks = sum(a["last7d"].get("impressions", 0) * a["last7d"].get("ctr", 0) / 100
+                                   for a in adsets if a["last7d"].get("ctr"))
+                total_imp = sum(a["last7d"].get("impressions", 0) for a in adsets)
+                cpc = round(p7["spend"] / total_clicks, 2) if total_clicks > 0 else None
+                conv_total = p7["purchases"] + p7["signups"]
+                conv_rate = round(conv_total / total_clicks * 100, 2) if total_clicks > 0 else None
+                snapshot[name] = {
+                    "spend": p7["spend"],
+                    "purchases": p7["purchases"],
+                    "signups": p7["signups"],
+                    "roas": p7["roas"],
+                    "cpa": p7["cpa"],
+                    "cpl": p7["cpl"],
+                    "cpc": cpc,
+                    "conv_rate": conv_rate,
+                    "impressions": total_imp,
+                }
+            brain.write("monitor/prev_brand_metrics", snapshot, tenant_id=tenant_id)
+        except Exception:
+            pass
+
     def _build_message(self, brands: dict, analysis: dict) -> str:
         now = datetime.now()
         today_str = now.strftime("%d/%m/%Y")
         time_str  = now.strftime("%H:%M")
 
-        # Totais globais por período
+        def _delta(curr, prev, invert=False):
+            """Retorna string de variação com seta e %. invert=True = queda é bom."""
+            if curr is None or prev is None or prev == 0:
+                return ""
+            pct = (curr - prev) / abs(prev) * 100
+            if abs(pct) < 2:
+                return " (estavel)"
+            arrow = "↑" if pct > 0 else "↓"
+            good = (pct < 0) if invert else (pct > 0)
+            sign = "+" if pct > 0 else ""
+            tag = "BOM" if good else "ATENCAO"
+            return f" {arrow}{sign}{pct:.1f}% [{tag}]"
+
         def _totals(period: str):
             spend = sum(b[period]["spend"] for b in brands.values())
             purchases = sum(b[period]["purchases"] for b in brands.values())
@@ -361,74 +416,110 @@ class PerformanceMonitor(AgentBase):
         w_spend, w_purch, w_sign, w_roas = _totals("last7d")
 
         lines = [
-            "D10 META AI - Relatorio de Campanhas",
-            f"Horario: {time_str} | Data: {today_str}",
+            "═══════════════════════════════",
+            "   D10 META AI — RELATORIO",
+            f"   {today_str}  {time_str} (Brasilia)",
+            "═══════════════════════════════",
             "",
-            "RESUMO GERAL",
-            f"{'Periodo':<12} {'Gasto':>10} {'Compras':>8} {'Cadastros':>10} {'ROAS':>6}",
-            f"{'Hoje':<12} R${t_spend:>8,.2f} {t_purch:>8} {t_sign:>10} {(str(t_roas)+'x') if t_roas else '-':>6}",
-            f"{'Ontem':<12} R${y_spend:>8,.2f} {y_purch:>8} {y_sign:>10} {(str(y_roas)+'x') if y_roas else '-':>6}",
-            f"{'7 dias':<12} R${w_spend:>8,.2f} {w_purch:>8} {w_sign:>10} {(str(w_roas)+'x') if w_roas else '-':>6}",
+            "RESUMO GERAL (7 dias / hoje)",
+            f"Gasto:    R${w_spend:,.2f}  /  R${t_spend:,.2f} hoje",
+            f"Vendas:   {w_purch} total  /  {t_purch} hoje",
+            f"Cadastros:{w_sign} total  /  {t_sign} hoje",
+            f"ROAS:     {(str(w_roas)+'x') if w_roas else '-'}  /  {(str(t_roas)+'x') if t_roas else '-'} hoje",
             "",
-            "=" * 34,
         ]
 
         sorted_brands = sorted(brands.values(), key=lambda b: -b["last7d"]["spend"])
 
         for b in sorted_brands:
-            p7 = b["last7d"]
-            pt = b["today"]
-            py = b["yesterday"]
+            p7  = b["last7d"]
+            pt  = b["today"]
+            py  = b["yesterday"]
+            prev = self._prev_metrics.get(b["name"], {})
+
             obj_sets = [a for a in b["adsets"] if a["objective"] == "purchase"]
             is_purchase = len(obj_sets) > len(b["adsets"]) / 2
 
-            # Status baseado em 7 dias
+            # Calcula CPC e taxa de conversão agregados dos adsets
+            total_clicks = 0
+            total_imp = 0
+            for a in b["adsets"]:
+                imp = a["last7d"].get("impressions", 0)
+                ctr_val = a["last7d"].get("ctr", 0)
+                total_imp += imp
+                total_clicks += round(imp * ctr_val / 100) if imp and ctr_val else 0
+
+            cpc = round(p7["spend"] / total_clicks, 2) if total_clicks > 0 else None
+            conv_total = p7["purchases"] + p7["signups"]
+            conv_rate  = round(conv_total / total_clicks * 100, 2) if total_clicks > 0 else None
+
+            # Status
             if is_purchase and p7["roas"]:
-                status = "BOM" if p7["roas"] >= 4.0 else ("MEDIO" if p7["roas"] >= 2.5 else "RUIM")
+                if p7["roas"] >= 4.0:   status_icon = "✅"
+                elif p7["roas"] >= 2.5: status_icon = "⚠️"
+                else:                   status_icon = "🔴"
             elif not is_purchase and p7["cpl"]:
-                status = "BOM" if p7["cpl"] <= 1.50 else ("MEDIO" if p7["cpl"] <= 2.50 else "RUIM")
+                if p7["cpl"] <= 1.50:   status_icon = "✅"
+                elif p7["cpl"] <= 2.50: status_icon = "⚠️"
+                else:                   status_icon = "🔴"
             else:
-                status = "SEM DADOS"
+                status_icon = "⚪"
 
-            icon = {"BOM": "[BOM]", "MEDIO": "[MEDIO]", "RUIM": "[RUIM]", "SEM DADOS": "[?]"}.get(status)
+            lines.append(f"───────────────────────────────")
+            lines.append(f"{status_icon} {b['name'].upper()}")
+            lines.append("")
 
-            lines.append(f"\n{icon} {b['name'].upper()}")
+            # Gasto
+            d_spend = _delta(p7["spend"], prev.get("spend"), invert=False)
+            lines.append(f"  Gasto 7d:    R${p7['spend']:,.2f}{d_spend}")
+            lines.append(f"  Gasto hoje:  R${pt['spend']:,.2f}  |  Ontem: R${py['spend']:,.2f}")
+            lines.append("")
 
-            # Tabela dos 3 períodos por marca
-            lines.append(f"  {'Periodo':<10} {'Gasto':>9} {'Comp':>5} {'Cad':>5} {'ROAS/CPL':>9}")
+            # Vendas / Registros
+            d_purch = _delta(p7["purchases"], prev.get("purchases"))
+            d_sign  = _delta(p7["signups"],   prev.get("signups"))
+            lines.append(f"  Vendas 7d:   {p7['purchases']}{d_purch}")
+            lines.append(f"  Registros 7d:{p7['signups']}{d_sign}")
+            lines.append(f"  Hoje:        {pt['purchases']} vendas / {pt['signups']} cadastros")
+            lines.append("")
 
-            def _row(label: str, p: dict, is_pur: bool) -> str:
-                perf = f"ROAS {p['roas']:.2f}x" if is_pur and p["roas"] else \
-                       f"CPL R${p['cpl']:.2f}" if p["cpl"] else "-"
-                return f"  {label:<10} R${p['spend']:>7,.2f} {p['purchases']:>5} {p['signups']:>5} {perf:>9}"
+            # ROAS / CPA / CPL
+            if is_purchase and p7["roas"]:
+                d_roas = _delta(p7["roas"], prev.get("roas"))
+                lines.append(f"  ROAS 7d:     {p7['roas']:.2f}x{d_roas}")
+            if p7["cpa"]:
+                d_cpa = _delta(p7["cpa"], prev.get("cpa"), invert=True)
+                lines.append(f"  CPA (compra):R${p7['cpa']:.2f}{d_cpa}")
+            if p7["cpl"]:
+                d_cpl = _delta(p7["cpl"], prev.get("cpl"), invert=True)
+                lines.append(f"  CPL (cad):   R${p7['cpl']:.2f}{d_cpl}")
+            lines.append("")
 
-            lines.append(_row("Hoje",   pt, is_purchase))
-            lines.append(_row("Ontem",  py, is_purchase))
-            lines.append(_row("7 dias", p7, is_purchase))
+            # CPC e Taxa de Conversão
+            if cpc:
+                d_cpc = _delta(cpc, prev.get("cpc"), invert=True)
+                lines.append(f"  CPC 7d:      R${cpc:.2f}{d_cpc}")
+            if conv_rate is not None:
+                d_cr = _delta(conv_rate, prev.get("conv_rate"))
+                lines.append(f"  Taxa Conv.:  {conv_rate:.2f}%{d_cr}")
+            if total_imp:
+                lines.append(f"  Impressoes:  {total_imp:,}")
+            lines.append("")
 
-            # Top 3 conjuntos por gasto (período de 7 dias)
-            top = sorted(b["adsets"], key=lambda a: -a["last7d"]["spend"])[:3]
-            lines.append(f"  Conjuntos ({len(b['adsets'])} ativos):")
-            for a in top:
-                short = a["name"].split("/")[-1].strip()[:24]
-                p = a["last7d"]
-                perf = f"ROAS {p['roas']:.2f}x" if p["roas"] else \
-                       f"CPL R${p['cpl']:.2f}" if p["cpl"] else ""
-                conv = f"{p['purchases']}c" if p["purchases"] else f"{p['signups']}cad" if p["signups"] else ""
-                lines.append(f"  - {short}: R${p['spend']:,.0f} {perf} {conv}")
-
-            lines.append("  " + "-" * 32)
-
-        # Ações
-        lines.append("\nACOES:")
-        if analysis["alerts"] or analysis["opportunities"]:
+        lines.append("═══════════════════════════════")
+        # Alertas e oportunidades
+        if analysis["alerts"]:
+            lines.append("ALERTAS:")
             for al in analysis["alerts"]:
-                tag = "[CRITICO]" if al["severity"] == "critical" else "[ATENCAO]"
-                lines.append(f"{tag} {al['brand']}: {al['msg']}")
+                tag = "CRITICO" if al["severity"] == "critical" else "ATENCAO"
+                lines.append(f"  [{tag}] {al['brand']}: {al['msg']}")
+        if analysis["opportunities"]:
+            lines.append("OPORTUNIDADES:")
             for op in analysis["opportunities"]:
-                lines.append(f"[ESCALAR] {op['brand']}: {op['msg']}")
-        else:
-            lines.append("Todas as campanhas dentro do esperado.")
+                lines.append(f"  [ESCALAR] {op['brand']}: {op['msg']}")
+        if not analysis["alerts"] and not analysis["opportunities"]:
+            lines.append("STATUS: Todas campanhas dentro do esperado.")
+        lines.append("═══════════════════════════════")
 
         return "\n".join(lines)
 
